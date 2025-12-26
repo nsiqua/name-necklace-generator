@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Name Necklace SVG Generator</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Name Necklace SVG Generator</h1>
+    <p class="subtitle">Create laser-cut friendly SVG files for stainless steel name necklaces</p>
+    
+    <!-- ============================================ -->
+    <!-- BASIC SECTION (always visible, minimal UI) -->
+    <!-- ============================================ -->
+    <div class="basic-section">
+      <div class="input-section">
+        <label for="nameInput">Enter Name:</label>
+        <input 
+          type="text" 
+          id="nameInput" 
+          placeholder="Type a name..."
+          maxlength="20"
+        >
+      </div>
+
+      <div class="control-group">
+        <label for="targetHeightInput">
+          Pendant Height: <span id="targetHeightValue">15</span>mm
+        </label>
+        <input 
+          type="range" 
+          id="targetHeightInput" 
+          min="5" 
+          max="100" 
+          value="15" 
+          step="1"
+        >
+        <small class="helper-text">Typical sizes: Small 6–14mm • Medium 15–25mm • Large 25mm+</small>
+      </div>
+    </div>
+
+    <!-- Preview Section -->
+    <div class="preview-section">
+      <div class="preview-header">
+        <h2>Preview</h2>
+        <!-- Reset ViewBox button removed - auto-fit is now automatic -->
+      </div>
+      <div id="previewArea" class="preview-area">
+        <svg id="previewSvg" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg">
+          <path id="namePath" d="" fill="#000000"></path>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Download Button (primary CTA) -->
+    <button id="downloadBtn" class="download-btn" disabled>
+      Download SVG
+    </button>
+
+    <!-- ============================================ -->
+    <!-- ADVANCED SECTION (collapsible, optional)   -->
+    <!-- ============================================ -->
+    <details class="advanced-section">
+      <summary class="section-header">Advanced (optional)</summary>
+      
+      <div class="section-content">
+        <!-- LOOPS (enabled by default) -->
+        <div class="subsection">
+          <h3>Chain Attachment Loops</h3>
+          <div class="control-group checkbox-group">
+            <label for="loopsCheckbox" class="checkbox-label">
+              <input 
+                type="checkbox" 
+                id="loopsCheckbox"
+                checked
+              >
+              <span>Enable loops at left & right top edges</span>
+            </label>
+          </div>
+
+          <div class="control-group-inline">
+            <div class="inline-control">
+              <label for="loopInnerDiameterInput">Inner Diameter (mm):</label>
+              <input 
+                type="number" 
+                id="loopInnerDiameterInput" 
+                min="1.0" 
+                max="10.0" 
+                step="0.1" 
+                value="3.0"
+              >
+            </div>
+            <div class="inline-control">
+              <label for="loopOuterDiameterInput">Outer Diameter (mm):</label>
+              <input 
+                type="number" 
+                id="loopOuterDiameterInput" 
+                min="3.0" 
+                max="10.0" 
+                step="0.1" 
+                value="5.5"
+              >
+              <small style="display: block; font-size: 0.75em; opacity: 0.7;">Must be larger than inner</small>
+            </div>
+            <div class="inline-control" style="opacity: 0.6;">
+              <label>Loop Thickness (mm):</label>
+              <span id="loopThicknessDisplay">1.25</span>
+              <small style="display: block; font-size: 0.75em;">(outer - inner) ÷ 2</small>
+            </div>
+          </div>
+
+          <div class="control-group-inline">
+            <div class="inline-control">
+              <label for="loopOffsetInput">Offset from Text (mm):</label>
+              <input 
+                type="number" 
+                id="loopOffsetInput" 
+                min="0.0" 
+                max="5.0" 
+                step="0.1" 
+                value="0.6"
+              >
+            </div>
+            <div class="inline-control">
+              <label for="loopOverlapInput">Loop Overlap (mm):</label>
+              <input 
+                type="number" 
+                id="loopOverlapInput" 
+                min="0.1" 
+                max="3.0" 
+                step="0.1" 
+                value="1.6"
+              >
+              <small style="display: block; font-size: 0.75em; opacity: 0.7;">Overlap for welding</small>
+            </div>
+          </div>
+        </div>
+
+        <!-- STRENGTHEN OFFSET (enabled by default) -->
+        <div class="subsection">
+          <h3>Strengthen Offset</h3>
+          <div class="control-group checkbox-group">
+            <label for="strengthenOffsetToggle" class="checkbox-label">
+              <input type="checkbox" id="strengthenOffsetToggle" checked>
+              <span>Apply outward offset to thicken design</span>
+            </label>
+            <p class="help-text">Improves durability for stainless steel laser cutting</p>
+          </div>
+
+          <div class="control-group" id="strengthenAmountControls">
+            <label for="strengthenAmountInput">
+              Offset Amount (mm): <span id="strengthenAmountValue">0.25</span>mm
+            </label>
+            <input
+              type="range"
+              id="strengthenAmountSlider"
+              min="0.00"
+              max="1.00"
+              step="0.01"
+              value="0.25"
+            />
+            <input
+              type="number"
+              id="strengthenAmountInput"
+              min="0.00"
+              max="1.00"
+              step="0.01"
+              value="0.25"
+            />
+          </div>
+        </div>
+
+        <!-- TUNING CONTROLS -->
+        <div class="subsection">
+          <h3>Typography Tuning</h3>
+          
+          <div class="control-group">
+            <label for="letterSpacingSlider">
+              Letter Spacing: <span id="letterSpacingValue">0.00</span>em
+            </label>
+            <input 
+              type="range" 
+              id="letterSpacingSlider" 
+              min="-0.9" 
+              max="1.0" 
+              value="0" 
+              step="0.01"
+            >
+          </div>
+
+          <div class="control-group">
+            <label for="fontSizeSlider">
+              Font Size: <span id="fontSizeValue">80</span>px
+            </label>
+            <input 
+              type="range" 
+              id="fontSizeSlider" 
+              min="20" 
+              max="200" 
+              value="80"
+              step="1"
+            >
+          </div>
+
+          <div class="control-group checkbox-group">
+            <label for="weldCheckbox" class="checkbox-label">
+              <input 
+                type="checkbox" 
+                id="weldCheckbox"
+                checked
+              >
+              <span>Weld (Union) - Merge overlapping paths into single shape</span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <!-- ============================================ -->
+    <!-- EXPERT / DEBUG SECTION (collapsible)        -->
+    <!-- ============================================ -->
+    <details class="expert-section" id="expertSection">
+      <summary class="section-header">Expert / Debug (for tuning & troubleshooting)</summary>
+      
+      <div class="section-content">
+        <!-- FONT LOADING STATUS (moved from top) -->
+        <div class="subsection">
+          <h3>Font Loading Status</h3>
+          <div id="statusBar" class="status-bar loading">
+            <span id="statusText">Loading font...</span>
+          </div>
+        </div>
+
+        <!-- PAIR SPACING OVERRIDES -->
+        <div class="subsection">
+          <h3>Pair Spacing Overrides</h3>
+          <div class="control-group">
+            <label for="pairSpacingTextarea">
+              Custom spacing per letter pair (em units)
+              <button id="loadPresetBtn" class="small-btn">Load Preset</button>
+            </label>
+            <textarea 
+              id="pairSpacingTextarea" 
+              rows="5" 
+              placeholder="Enter pair overrides, one per line:&#10;So=-0.60&#10;of=-0.90&#10;fi=-0.85"
+            ></textarea>
+            <div id="pairSpacingWarnings" class="warnings"></div>
+          </div>
+        </div>
+
+        <!-- DEBUG TOGGLES -->
+        <div class="subsection">
+          <h3>Debug Visualization</h3>
+          
+          <div class="control-group checkbox-group">
+            <label for="debugCheckbox" class="checkbox-label">
+              <input 
+                type="checkbox" 
+                id="debugCheckbox"
+              >
+              <span>Debug Mode - Log spacing calculations to console (F12)</span>
+            </label>
+          </div>
+
+          <div class="control-group checkbox-group">
+            <label for="debugAnchorsCheckbox" class="checkbox-label">
+              <input 
+                type="checkbox" 
+                id="debugAnchorsCheckbox"
+              >
+              <span>Show Loop Anchor Points - Visualize attachment points (red=left, blue=right)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- I-DOT CONNECTION CONTROLS -->
+        <div class="subsection">
+          <h3>i-Dot Connection (for laser cutting)</h3>
+          <div class="control-group checkbox-group">
+            <label for="connectIDotsCheckbox" class="checkbox-label">
+              <input 
+                type="checkbox" 
+                id="connectIDotsCheckbox"
+                checked
+              >
+              <span>Connect i-dot - Move dots down to overlap stems</span>
+            </label>
+          </div>
+
+          <div class="control-group-inline">
+            <div class="inline-control">
+              <label for="iDotOverlapInput">Overlap (mm):</label>
+              <input 
+                type="number" 
+                id="iDotOverlapInput" 
+                min="0.1" 
+                max="2.0" 
+                step="0.1" 
+                value="0.4"
+              >
+            </div>
+            <div class="inline-control">
+              <label for="iDotMaxShiftInput">Max Shift (mm):</label>
+              <input 
+                type="number" 
+                id="iDotMaxShiftInput" 
+                min="0.5" 
+                max="5.0" 
+                step="0.1" 
+                value="2.0"
+              >
+            </div>
+            <div class="inline-control">
+              <label for="iDotSearchRadiusInput">Search Radius (mm):</label>
+              <input 
+                type="number" 
+                id="iDotSearchRadiusInput" 
+                min="1.0" 
+                max="10.0" 
+                step="0.5" 
+                value="6.0"
+              >
+            </div>
+          </div>
+        </div>
+
+        <!-- AUTO-CONNECT ADJACENT LETTERS -->
+        <div class="subsection">
+          <h3>Auto-Connect Adjacent Letters</h3>
+          <p class="help-text">Automatically adjusts spacing to ensure adjacent glyphs overlap by a minimum amount, preventing disconnected letters.</p>
+          
+          <div class="control-group checkbox-group">
+            <label for="autoConnectCheckbox" class="checkbox-label">
+              <input 
+                type="checkbox" 
+                id="autoConnectCheckbox"
+                checked
+              >
+              <span>Enable Auto-Connect (geometry-based spacing enforcement)</span>
+            </label>
+          </div>
+
+          <div class="control-group-inline">
+            <div class="inline-control">
+              <label for="autoConnectMinOverlapInput">Min Overlap (mm):</label>
+              <input 
+                type="number" 
+                id="autoConnectMinOverlapInput" 
+                min="0.1" 
+                max="2.0" 
+                step="0.1" 
+                value="0.4"
+              >
+              <small style="display: block; font-size: 0.75em; opacity: 0.7;">Required overlap between adjacent letters</small>
+            </div>
+            <div class="inline-control">
+              <label for="autoConnectMaxTightenInput">Max Tighten (mm):</label>
+              <input 
+                type="number" 
+                id="autoConnectMaxTightenInput" 
+                min="0.5" 
+                max="10.0" 
+                step="0.5" 
+                value="6.0"
+              >
+              <small style="display: block; font-size: 0.75em; opacity: 0.7;">Safety limit per pair</small>
+            </div>
+          </div>
+
+          <div class="control-group checkbox-group">
+            <label for="autoConnectDebugLogCheckbox" class="checkbox-label">
+              <input 
+                type="checkbox" 
+                id="autoConnectDebugLogCheckbox"
+              >
+              <span>Debug: Log auto-adjustments to console</span>
+            </label>
+          </div>
+
+          <div class="control-group checkbox-group">
+            <label for="autoConnectDebugMarkersCheckbox" class="checkbox-label">
+              <input 
+                type="checkbox" 
+                id="autoConnectDebugMarkersCheckbox"
+              >
+              <span>Debug: Draw overlap markers in preview</span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- Hidden canvas for Paper.js operations -->
+  <canvas id="paperCanvas" style="display: none;"></canvas>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

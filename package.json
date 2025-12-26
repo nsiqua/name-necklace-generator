@@ -1,0 +1,19 @@
+{
+  "name": "name-necklace-svg",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "clipper-lib": "^6.4.2",
+    "opentype.js": "^1.3.4",
+    "paper": "^0.12.17"
+  },
+  "devDependencies": {
+    "vite": "^7.3.0"
+  }
+}

@@ -1,0 +1,3050 @@
+/**
+ * Name Necklace SVG Generator
+ * 
+ * ARCHITECTURE OVERVIEW:
+ * 
+ * 1. FONT LOADING (opentype.js)
+ *    - Loads Pacifico-Regular.ttf from /public/fonts/
+ *    - Provides glyph access and kerning data
+ * 
+ * 2. TEXT LAYOUT (layoutTextWithPairSpacing)
+ *    - Computes glyph positions with:
+ *      a) OpenType kerning (font.getKerningValue)
+ *      b) Default letter spacing (slider value)
+ *      c) Pair-specific overrides (from textarea)
+ *    - Returns array of {glyph, x, y} placements
+ * 
+ * 3. PATH GENERATION (generatePathWithKerning)
+ *    - Uses layoutTextWithPairSpacing for positioning
+ *    - Builds SVG path data from glyph outlines
+ *    - Can return combined path or individual letter paths
+ * 
+ * 4. BOOLEAN OPERATIONS (applyPaperJsUnion - Paper.js)
+ *    - Imports individual letter paths
+ *    - i-DOT CONNECTION: Moves i/j dots down to overlap stems
+ *    - LOOPS: Adds attachment points (donut shapes) at left/right top edges
+ *    - Applies unite() operation iteratively to merge all paths
+ *    - Exports merged path back to SVG format
+ * 
+ * 5. EXPORT (generateLaserCutSVG)
+ *    - Scales to target height in mm
+ *    - Uses 96 DPI for px↔mm conversion
+ *    - Generates final SVG with proper dimensions
+ * 
+ * DATA FLOW:
+ * User Input → layoutTextWithPairSpacing → Path Generation → 
+ * [Optional: i-dot connection + Loops + Welding] → Export
+ */
+
+import opentype from 'opentype.js';
+import paper from 'paper';
+import ClipperLib from 'clipper-lib';
+
+// Get DOM elements
+const nameInput = document.getElementById('nameInput');
+const namePath = document.getElementById('namePath');
+const previewSvg = document.getElementById('previewSvg');
+const downloadBtn = document.getElementById('downloadBtn');
+// resetViewBoxBtn removed - auto-fit is now automatic
+const statusBar = document.getElementById('statusBar');
+const statusText = document.getElementById('statusText');
+
+// Sliders and controls
+const fontSizeSlider = document.getElementById('fontSizeSlider');
+const fontSizeValue = document.getElementById('fontSizeValue');
+const letterSpacingSlider = document.getElementById('letterSpacingSlider');
+const letterSpacingValue = document.getElementById('letterSpacingValue');
+const targetHeightInput = document.getElementById('targetHeightInput');
+const targetHeightValue = document.getElementById('targetHeightValue');
+const weldCheckbox = document.getElementById('weldCheckbox');
+const debugCheckbox = document.getElementById('debugCheckbox');
+const debugAnchorsCheckbox = document.getElementById('debugAnchorsCheckbox');
+const connectIDotsCheckbox = document.getElementById('connectIDotsCheckbox');
+const iDotOverlapInput = document.getElementById('iDotOverlapInput');
+const iDotMaxShiftInput = document.getElementById('iDotMaxShiftInput');
+const iDotSearchRadiusInput = document.getElementById('iDotSearchRadiusInput');
+const autoConnectCheckbox = document.getElementById('autoConnectCheckbox');
+const autoConnectMinOverlapInput = document.getElementById('autoConnectMinOverlapInput');
+const autoConnectMaxTightenInput = document.getElementById('autoConnectMaxTightenInput');
+const autoConnectDebugLogCheckbox = document.getElementById('autoConnectDebugLogCheckbox');
+const autoConnectDebugMarkersCheckbox = document.getElementById('autoConnectDebugMarkersCheckbox');
+const loopsCheckbox = document.getElementById('loopsCheckbox');
+const loopInnerDiameterInput = document.getElementById('loopInnerDiameterInput');
+const loopOuterDiameterInput = document.getElementById('loopOuterDiameterInput');
+const loopThicknessDisplay = document.getElementById('loopThicknessDisplay');
+const loopOffsetInput = document.getElementById('loopOffsetInput');
+const loopOverlapInput = document.getElementById('loopOverlapInput');
+const strengthenOffsetToggle = document.getElementById('strengthenOffsetToggle');
+const strengthenAmountSlider = document.getElementById('strengthenAmountSlider');
+const strengthenAmountInput = document.getElementById('strengthenAmountInput');
+const strengthenAmountValue = document.getElementById('strengthenAmountValue');
+const strengthenAmountControls = document.getElementById('strengthenAmountControls');
+const pairSpacingTextarea = document.getElementById('pairSpacingTextarea');
+const pairSpacingWarnings = document.getElementById('pairSpacingWarnings');
+const loadPresetBtn = document.getElementById('loadPresetBtn');
+
+// Paper.js canvas setup
+const paperCanvas = document.getElementById('paperCanvas');
+paper.setup(paperCanvas);
+
+// PX to MM conversion constants
+// Assumption: 96 DPI (CSS/Web standard)
+// 1 inch = 96 pixels (CSS pixel definition)
+// 1 inch = 25.4 mm
+// Therefore: 1 px = 25.4 / 96 mm ≈ 0.264583 mm
+// And: 1 mm = 96 / 25.4 px ≈ 3.7795 px
+const MM_PER_PX = 25.4 / 96;  // ~0.264583
+const PX_PER_MM = 96 / 25.4;  // ~3.7795
+
+// ============================================
+// BUILT-IN PAIR SPACING OVERRIDES
+// ============================================
+// These spacing overrides are ALWAYS applied for better typographic results.
+// They work even when the Expert section is hidden or the textarea is empty.
+// User overrides in the textarea will take precedence over these defaults.
+//
+// Current built-in overrides (in em units):
+//   So=-0.15  : Tighten "So" pair (e.g., in "Sofia") for better cursive flow
+//   IA=-0.21  : Tighten "IA" pair (e.g., in "SOFIA") to ensure connection
+//   o-=-0.25  : Tighten "o" followed by hyphen for better spacing
+//   -b=-0.21  : Tighten hyphen followed by "b" for better spacing
+const BUILTIN_PAIR_OVERRIDES = {
+  "So": -0.15,
+  "IA": -0.21,
+  "o-": -0.25,
+  "-b": -0.21
+};
+
+// Global font variable and settings
+let pacificoFont = null;
+// ============================================
+// DEFAULT SETTINGS (for stainless steel)
+// ============================================
+let currentSettings = {
+  fontSize: 80,
+  letterSpacing: 0,
+  targetHeight: 15,  // in mm
+  weldPaths: true,   // boolean union enabled by default
+  pairSpacingMap: { ...BUILTIN_PAIR_OVERRIDES }, // pair-specific spacing overrides (start with built-in defaults)
+  connectIDots: true, // connect i/j dots to stems
+  iDotOverlap: 0.4,   // mm of overlap to create
+  iDotMaxShift: 2.0,  // mm maximum downward shift
+  iDotSearchRadius: 6.0, // mm search radius for matching stems
+  
+  // LOOPS: enabled by default for stainless steel
+  addLoops: true,     
+  loopInnerDiameter: 3.0,  // mm (default for stainless)
+  loopOuterDiameter: 5.5,  // mm (default for stainless)
+  loopOffset: 0.6,         // mm offset from text
+  loopOverlap: 1.6,        // mm overlap for welding (increased default)
+  
+  // STRENGTHEN: enabled by default for stainless steel
+  strengthenOffset: true,  // apply outward offset for durability
+  strengthenAmount: 0.25,  // mm (default for stainless)
+  
+  // AUTO-CONNECT: geometry-based spacing enforcement (Expert feature)
+  autoConnect: true,            // enable auto-connect adjacent letters (enabled by default)
+  autoConnectMinOverlap: 0.4,   // mm minimum overlap required
+  autoConnectMaxTighten: 6.0,   // mm maximum tightening per pair (safety, increased for edge cases)
+  autoConnectDebugLog: false,   // log auto-adjustments to console
+  autoConnectDebugMarkers: false, // draw overlap markers in preview
+  
+  debugMode: false,        // enable debug logging and visualization
+  debugAnchors: false      // show loop anchor points
+};
+
+// ============================================
+// INITIALIZE UI TO MATCH DEFAULT SETTINGS
+// ============================================
+function initializeUI() {
+  // Set all HTML elements to match currentSettings
+  fontSizeSlider.value = currentSettings.fontSize;
+  fontSizeValue.textContent = currentSettings.fontSize;
+  
+  letterSpacingSlider.value = currentSettings.letterSpacing;
+  letterSpacingValue.textContent = currentSettings.letterSpacing.toFixed(2);
+  
+  targetHeightInput.value = currentSettings.targetHeight;
+  targetHeightValue.textContent = currentSettings.targetHeight;
+  
+  weldCheckbox.checked = currentSettings.weldPaths;
+  connectIDotsCheckbox.checked = currentSettings.connectIDots;
+  debugCheckbox.checked = currentSettings.debugMode;
+  debugAnchorsCheckbox.checked = currentSettings.debugAnchors;
+  
+  // i-dot controls
+  iDotOverlapInput.value = currentSettings.iDotOverlap;
+  iDotMaxShiftInput.value = currentSettings.iDotMaxShift;
+  iDotSearchRadiusInput.value = currentSettings.iDotSearchRadius;
+  
+  // AUTO-CONNECT: disabled by default (Expert feature)
+  autoConnectCheckbox.checked = currentSettings.autoConnect;
+  autoConnectMinOverlapInput.value = currentSettings.autoConnectMinOverlap;
+  autoConnectMaxTightenInput.value = currentSettings.autoConnectMaxTighten || 6.0;
+  autoConnectDebugLogCheckbox.checked = currentSettings.autoConnectDebugLog;
+  autoConnectDebugMarkersCheckbox.checked = currentSettings.autoConnectDebugMarkers;
+  
+  // LOOPS: enabled by default with stainless steel defaults
+  loopsCheckbox.checked = currentSettings.addLoops;
+  loopInnerDiameterInput.value = currentSettings.loopInnerDiameter;
+  loopOuterDiameterInput.value = currentSettings.loopOuterDiameter;
+  loopOffsetInput.value = currentSettings.loopOffset;
+  loopOverlapInput.value = currentSettings.loopOverlap;
+  
+  // Calculate and display loop thickness
+  const thickness = (currentSettings.loopOuterDiameter - currentSettings.loopInnerDiameter) / 2;
+  loopThicknessDisplay.textContent = thickness.toFixed(2);
+  
+  // STRENGTHEN: enabled by default with stainless steel defaults
+  strengthenOffsetToggle.checked = currentSettings.strengthenOffset;
+  strengthenAmountSlider.value = currentSettings.strengthenAmount;
+  strengthenAmountInput.value = currentSettings.strengthenAmount;
+  strengthenAmountValue.textContent = currentSettings.strengthenAmount.toFixed(2);
+  
+  // Set initial state of strengthen amount controls
+  if (currentSettings.strengthenOffset) {
+    strengthenAmountControls.classList.remove('disabled');
+  } else {
+    strengthenAmountControls.classList.add('disabled');
+  }
+  
+  console.log('✓ UI initialized with defaults (loops ON, strengthen ON for stainless steel)');
+}
+
+// Load the Pacifico font at startup
+async function loadFont() {
+  try {
+    statusBar.className = 'status-bar loading';
+    statusText.textContent = 'Loading Pacifico font...';
+    
+    // Load font from public folder
+    const response = await fetch('/fonts/Pacifico-Regular.ttf');
+    
+    if (!response.ok) {
+      throw new Error(`Font file not found (HTTP ${response.status}). Please ensure Pacifico-Regular.ttf is in the /public/fonts/ folder.`);
+    }
+    
+    const arrayBuffer = await response.arrayBuffer();
+    pacificoFont = opentype.parse(arrayBuffer);
+    
+    // Font loaded successfully
+    statusBar.className = 'status-bar success';
+    statusText.textContent = 'Font loaded successfully! Ready to create your necklace.';
+    
+    // Initialize UI to match default settings
+    initializeUI();
+    
+    // Enable the input
+    nameInput.disabled = false;
+    nameInput.focus();
+    
+    console.log('✓ Pacifico font loaded:', pacificoFont.names.fullName.en);
+    
+  } catch (error) {
+    console.error('Font loading error:', error);
+    statusBar.className = 'status-bar error';
+    statusText.textContent = `Error: ${error.message}`;
+    
+    // Auto-expand Expert section so user can see the error (if visible)
+    if (expertSection && !expertSection.classList.contains('dev-only-hidden')) {
+      expertSection.open = true;
+    }
+    
+    // Keep input disabled if font fails to load
+    nameInput.disabled = true;
+    downloadBtn.disabled = true;
+  }
+}
+
+// Update preview when user types
+nameInput.addEventListener('input', (e) => {
+  generatePreview();
+});
+
+// Update preview when sliders change
+fontSizeSlider.addEventListener('input', (e) => {
+  currentSettings.fontSize = parseFloat(e.target.value);
+  fontSizeValue.textContent = Math.round(currentSettings.fontSize);
+  generatePreview();
+});
+
+letterSpacingSlider.addEventListener('input', (e) => {
+  currentSettings.letterSpacing = parseFloat(e.target.value);
+  letterSpacingValue.textContent = currentSettings.letterSpacing.toFixed(2);
+  generatePreview();
+});
+
+targetHeightInput.addEventListener('input', (e) => {
+  currentSettings.targetHeight = parseFloat(e.target.value);
+  targetHeightValue.textContent = Math.round(currentSettings.targetHeight);
+  // Note: Target height only affects the downloaded SVG, not the preview
+});
+
+weldCheckbox.addEventListener('change', (e) => {
+  currentSettings.weldPaths = e.target.checked;
+  generatePreview();
+});
+
+debugCheckbox.addEventListener('change', (e) => {
+  currentSettings.debugMode = e.target.checked;
+  window.DEBUG_PAIR_SPACING = e.target.checked;
+  window.DEBUG_I_DOTS = e.target.checked;
+  if (e.target.checked) {
+    console.log('🔍 Debug mode enabled - generating preview with detailed logs...');
+  }
+  generatePreview();
+});
+
+debugAnchorsCheckbox.addEventListener('change', (e) => {
+  window.DEBUG_LOOP_ANCHORS = e.target.checked;
+  if (e.target.checked) {
+    console.log('🎨 Loop anchor visualization enabled - red=left, blue=right');
+  }
+  generatePreview();
+});
+
+connectIDotsCheckbox.addEventListener('change', (e) => {
+  currentSettings.connectIDots = e.target.checked;
+  generatePreview();
+});
+
+iDotOverlapInput.addEventListener('input', (e) => {
+  currentSettings.iDotOverlap = parseFloat(e.target.value) || 0.4;
+  generatePreview();
+});
+
+iDotMaxShiftInput.addEventListener('input', (e) => {
+  currentSettings.iDotMaxShift = parseFloat(e.target.value) || 2.0;
+  generatePreview();
+});
+
+iDotSearchRadiusInput.addEventListener('input', (e) => {
+  currentSettings.iDotSearchRadius = parseFloat(e.target.value) || 6.0;
+  generatePreview();
+});
+
+// Auto-connect controls
+autoConnectCheckbox.addEventListener('change', (e) => {
+  currentSettings.autoConnect = e.target.checked;
+  console.log(`Auto-connect ${e.target.checked ? 'ENABLED' : 'DISABLED'}`);
+  generatePreview();
+});
+
+autoConnectMinOverlapInput.addEventListener('input', (e) => {
+  currentSettings.autoConnectMinOverlap = parseFloat(e.target.value) || 0.4;
+  if (currentSettings.autoConnect) {
+    generatePreview();
+  }
+});
+
+autoConnectMaxTightenInput.addEventListener('input', (e) => {
+  currentSettings.autoConnectMaxTighten = parseFloat(e.target.value) || 3.0;
+  if (currentSettings.autoConnect) {
+    generatePreview();
+  }
+});
+
+autoConnectDebugLogCheckbox.addEventListener('change', (e) => {
+  currentSettings.autoConnectDebugLog = e.target.checked;
+  if (currentSettings.autoConnect) {
+    generatePreview();
+  }
+});
+
+autoConnectDebugMarkersCheckbox.addEventListener('change', (e) => {
+  currentSettings.autoConnectDebugMarkers = e.target.checked;
+  if (currentSettings.autoConnect) {
+    generatePreview();
+  }
+});
+
+// Loop controls
+loopsCheckbox.addEventListener('change', (e) => {
+  currentSettings.addLoops = e.target.checked;
+  generatePreview();
+});
+
+loopInnerDiameterInput.addEventListener('input', (e) => {
+  currentSettings.loopInnerDiameter = parseFloat(e.target.value) || 3.0;
+  
+  // Ensure outer diameter is always larger than inner diameter
+  if (currentSettings.loopOuterDiameter <= currentSettings.loopInnerDiameter) {
+    currentSettings.loopOuterDiameter = currentSettings.loopInnerDiameter + 0.2;
+    loopOuterDiameterInput.value = currentSettings.loopOuterDiameter.toFixed(1);
+  }
+  
+  updateLoopThicknessDisplay();
+  generatePreview();
+});
+
+loopOuterDiameterInput.addEventListener('input', (e) => {
+  currentSettings.loopOuterDiameter = parseFloat(e.target.value) || 4.6;
+  
+  // Ensure outer diameter is always larger than inner diameter
+  if (currentSettings.loopOuterDiameter <= currentSettings.loopInnerDiameter) {
+    currentSettings.loopOuterDiameter = currentSettings.loopInnerDiameter + 0.2;
+    loopOuterDiameterInput.value = currentSettings.loopOuterDiameter.toFixed(1);
+  }
+  
+  updateLoopThicknessDisplay();
+  generatePreview();
+});
+
+loopOffsetInput.addEventListener('input', (e) => {
+  currentSettings.loopOffset = parseFloat(e.target.value) || 0.6;
+  generatePreview();
+});
+
+loopOverlapInput.addEventListener('input', (e) => {
+  currentSettings.loopOverlap = parseFloat(e.target.value) || 0.4;
+  generatePreview();
+});
+
+// Strengthen offset checkbox
+strengthenOffsetToggle.addEventListener('change', (e) => {
+  currentSettings.strengthenOffset = e.target.checked;
+  console.log(`Strengthen offset ${e.target.checked ? 'ENABLED' : 'DISABLED'} (${currentSettings.strengthenAmount}mm)`);
+  
+  // Enable/disable the amount controls based on checkbox state
+  if (e.target.checked) {
+    strengthenAmountControls.classList.remove('disabled');
+  } else {
+    strengthenAmountControls.classList.add('disabled');
+  }
+  
+  generatePreview();
+});
+
+// Strengthen offset amount slider
+strengthenAmountSlider.addEventListener('input', (e) => {
+  const value = parseFloat(e.target.value) || 0.12;
+  currentSettings.strengthenAmount = value;
+  strengthenAmountInput.value = value.toFixed(2);
+  strengthenAmountValue.textContent = value.toFixed(2);
+  generatePreview();
+});
+
+// Strengthen offset amount numeric input
+strengthenAmountInput.addEventListener('input', (e) => {
+  let value = parseFloat(e.target.value);
+  if (isNaN(value)) value = 0.12;
+  if (value < 0) value = 0;
+  if (value > 1.0) value = 1.0;
+  
+  currentSettings.strengthenAmount = value;
+  strengthenAmountSlider.value = value;
+  strengthenAmountValue.textContent = value.toFixed(2);
+  generatePreview();
+});
+
+// Update loop thickness display (calculated from outer - inner)
+function updateLoopThicknessDisplay() {
+  const thickness = (currentSettings.loopOuterDiameter - currentSettings.loopInnerDiameter) / 2;
+  loopThicknessDisplay.textContent = thickness.toFixed(2);
+}
+
+// Initialize display
+updateLoopThicknessDisplay();
+
+// Pair spacing textarea handler with debounce
+let pairSpacingTimeout;
+pairSpacingTextarea.addEventListener('input', (e) => {
+  clearTimeout(pairSpacingTimeout);
+  pairSpacingTimeout = setTimeout(() => {
+    const result = parsePairSpacingMap(e.target.value);
+    
+    // Merge built-in overrides with user overrides (user wins on conflicts)
+    currentSettings.pairSpacingMap = { ...BUILTIN_PAIR_OVERRIDES, ...result.map };
+    
+    // Show warnings if any
+    if (result.warnings.length > 0) {
+      pairSpacingWarnings.textContent = result.warnings.join('; ');
+      pairSpacingWarnings.className = 'warnings visible';
+    } else {
+      pairSpacingWarnings.className = 'warnings';
+    }
+    
+    generatePreview();
+  }, 500); // 500ms debounce
+});
+
+// Load preset button
+loadPresetBtn.addEventListener('click', () => {
+  const preset = `So=-0.60
+of=-0.90
+fi=-0.85
+ia=-0.70`;
+  pairSpacingTextarea.value = preset;
+  pairSpacingTextarea.dispatchEvent(new Event('input'));
+});
+
+// Note: Auto-fit viewBox is now called automatically after each design update
+// Manual "Reset ViewBox" button has been removed from the UI
+
+// =====================================================
+// STRENGTHEN OFFSET (Clipper-based, PolyTree)
+// =====================================================
+
+// Clipper scaling: units per Paper.js pixel
+const CLIPPER_SCALE = 10000;
+
+// Helper: Convert mm to Paper.js pixels
+// We use the same conversion as for SVG export: 1mm = PX_PER_MM pixels
+function mmToPaperPixels(mm) {
+  // PX_PER_MM is defined based on 96 DPI: 96 / 25.4 ≈ 3.7795
+  const PX_PER_MM = 96 / 25.4;
+  return mm * PX_PER_MM;
+}
+
+/**
+ * Convert a Paper.js item (Path/CompoundPath/Group) into Clipper polygon rings.
+ * Simple extraction - let PolyTree+EvenOdd handle hole hierarchy automatically.
+ * @param {paper.Item} item - The Paper.js item to convert
+ * @param {number} flattenTolPixels - Tolerance for flattening curves (in Paper pixels)
+ * @returns {Array<Array<{X:number, Y:number}>>} Array of Clipper rings (closed point arrays)
+ */
+function paperItemToClipperRings(item, flattenTolPixels) {
+  const rings = [];
+  
+  // Extract all leaf paths from the item (no hole detection needed)
+  const paths = [];
+  
+  if (item instanceof paper.Path) {
+    paths.push(item);
+  } else if (item instanceof paper.CompoundPath) {
+    item.children.forEach(child => {
+      if (child instanceof paper.Path) {
+        paths.push(child);
+      }
+    });
+  } else if (item instanceof paper.Group) {
+    item.children.forEach(child => {
+      if (child instanceof paper.Path) {
+        paths.push(child);
+      } else if (child instanceof paper.CompoundPath) {
+        child.children.forEach(subChild => {
+          if (subChild instanceof paper.Path) {
+            paths.push(subChild);
+          }
+        });
+      }
+    });
+  }
+  
+  // Convert each path to a Clipper ring
+  for (const path of paths) {
+    if (!path.closed) continue; // Skip open paths
+    
+    // Clone and flatten to get a polygonal approximation
+    const clonedPath = path.clone();
+    clonedPath.flatten(flattenTolPixels);
+    
+    const ring = [];
+    for (let i = 0; i < clonedPath.segments.length; i++) {
+      const seg = clonedPath.segments[i];
+      const pt = {
+        X: Math.round(seg.point.x * CLIPPER_SCALE),
+        Y: Math.round(seg.point.y * CLIPPER_SCALE)
+      };
+      
+      // Skip duplicate consecutive points
+      if (ring.length === 0 || ring[ring.length - 1].X !== pt.X || ring[ring.length - 1].Y !== pt.Y) {
+        ring.push(pt);
+      }
+    }
+    
+    clonedPath.remove(); // Clean up
+    
+    // Only add rings with >= 3 points
+    if (ring.length >= 3) {
+      rings.push(ring);
+    }
+  }
+  
+  return rings;
+}
+
+/**
+ * Use Clipper to union all rings into a PolyTree (preserves hole hierarchy).
+ * Uses EvenOdd fill rule to avoid winding order sensitivity.
+ * @param {Array<Array<{X:number, Y:number}>>} rings - Array of Clipper rings
+ * @returns {ClipperLib.PolyTree} Unified PolyTree with hierarchy
+ */
+function clipperUnionToPolyTree(rings) {
+  const clipper = new ClipperLib.Clipper();
+  
+  // Simplify each ring before union
+  const simplifiedRings = [];
+  for (const ring of rings) {
+    const simplified = ClipperLib.Clipper.SimplifyPolygon(ring, ClipperLib.PolyFillType.pftEvenOdd);
+    if (simplified && simplified.length > 0) {
+      for (const s of simplified) {
+        if (s.length >= 3) {
+          simplifiedRings.push(s);
+        }
+      }
+    }
+  }
+  
+  // Add all rings as subjects
+  clipper.AddPaths(simplifiedRings, ClipperLib.PolyType.ptSubject, true);
+  
+  // Execute union into PolyTree with EvenOdd fill rule
+  const tree = new ClipperLib.PolyTree();
+  const succeeded = clipper.Execute(
+    ClipperLib.ClipType.ctUnion,
+    tree,
+    ClipperLib.PolyFillType.pftEvenOdd,
+    ClipperLib.PolyFillType.pftEvenOdd
+  );
+  
+  if (!succeeded) {
+    throw new Error('Clipper union failed');
+  }
+  
+  return tree;
+}
+
+/**
+ * Apply offset to a PolyTree using ClipperOffset.
+ * @param {ClipperLib.PolyTree} polyTree - Input PolyTree
+ * @param {number} deltaClipperUnits - Offset amount in Clipper units (positive = outward)
+ * @returns {ClipperLib.PolyTree} Offset result as PolyTree
+ */
+function clipperOffsetPolyTree(polyTree, deltaClipperUnits) {
+  const co = new ClipperLib.ClipperOffset(2, Math.abs(deltaClipperUnits) * 0.25);
+  
+  // Convert PolyTree to Paths for offsetting
+  const paths = ClipperLib.Clipper.PolyTreeToPaths(polyTree);
+  
+  // Add all paths to the offsetter
+  co.AddPaths(paths, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+  
+  // Execute offset into PolyTree
+  const outTree = new ClipperLib.PolyTree();
+  co.Execute(outTree, deltaClipperUnits);
+  
+  return outTree;
+}
+
+/**
+ * Convert Clipper PolyTree back to a Paper.js CompoundPath.
+ * NO smoothing or simplification - preserves exact offset shape.
+ * @param {ClipperLib.PolyTree} polyTree - Input PolyTree
+ * @returns {paper.CompoundPath} Result as Paper.js CompoundPath with evenodd fill rule
+ */
+function polyTreeToPaperCompoundPath(polyTree) {
+  // Convert PolyTree to flat Paths (preserves holes via winding)
+  const paths = ClipperLib.Clipper.PolyTreeToPaths(polyTree);
+  
+  const compoundPath = new paper.CompoundPath({
+    fillColor: 'black',
+    fillRule: 'evenodd'  // Critical for hole rendering
+  });
+  
+  for (const clipperPath of paths) {
+    if (clipperPath.length >= 3) {
+      // Convert Clipper points back to Paper.js coordinates
+      const points = clipperPath.map(pt => {
+        return new paper.Point(pt.X / CLIPPER_SCALE, pt.Y / CLIPPER_SCALE);
+      });
+      
+      // Create a Paper.js path WITHOUT smoothing/simplification
+      const path = new paper.Path({
+        segments: points,
+        closed: true
+      });
+      
+      // DO NOT smooth() or simplify() - this distorts small offsets!
+      
+      compoundPath.addChild(path);
+    }
+  }
+  
+  return compoundPath;
+}
+
+/**
+ * Apply a strengthen offset to a Paper.js item.
+ * Uses Clipper PolyTree with EvenOdd fill rule for proper hole preservation.
+ * @param {paper.Item} item - The final pendant shape
+ * @param {number} offsetMm - Outward offset amount in mm (e.g., 0.12)
+ * @param {boolean} debug - Enable debug logging
+ * @returns {paper.CompoundPath} Strengthened result
+ */
+function applyStrengthenOffset(item, offsetMm, debug) {
+  try {
+    const PX_PER_MM = 96 / 25.4;
+    
+    if (debug) {
+      console.log('\n🔧 === STRENGTHEN OFFSET START ===');
+      console.log(`Offset amount: ${offsetMm}mm`);
+      console.log(`Conversion: 1mm = ${PX_PER_MM.toFixed(4)}px`);
+    }
+    
+    // Convert offset to Paper.js pixels, then to Clipper units
+    const offsetPixels = mmToPaperPixels(offsetMm);
+    const offsetClipperUnits = offsetPixels * CLIPPER_SCALE;
+    
+    if (debug) {
+      console.log(`Offset in pixels: ${offsetPixels.toFixed(4)}px`);
+      console.log(`Offset in Clipper units: ${offsetClipperUnits.toFixed(0)}`);
+    }
+    
+    // Step 1: Convert Paper.js item to Clipper rings
+    const flattenTolMm = 0.03; // Fine tolerance for smooth curves
+    const flattenTolPixels = mmToPaperPixels(flattenTolMm);
+    
+    if (debug) {
+      console.log(`Flatten tolerance: ${flattenTolMm}mm (${flattenTolPixels.toFixed(4)}px)`);
+    }
+    
+    const rings = paperItemToClipperRings(item, flattenTolPixels);
+    
+    if (debug) {
+      console.log(`Extracted ${rings.length} ring(s) from Paper.js item`);
+    }
+    
+    if (rings.length === 0) {
+      console.warn('⚠️ No valid rings extracted; returning original item');
+      return item;
+    }
+    
+    // Step 2: Union into PolyTree (preserves hole hierarchy with EvenOdd)
+    const unionTree = clipperUnionToPolyTree(rings);
+    
+    // Validation: Convert to paths to count
+    const unionPaths = ClipperLib.Clipper.PolyTreeToPaths(unionTree);
+    
+    if (debug) {
+      console.log(`✓ Union PolyTree created with ${unionPaths.length} path(s)`);
+      
+      // Sanity check for holes (for text with "o" or loops, expect multiple paths)
+      if (unionPaths.length === 1) {
+        console.warn('  ⚠️ WARNING: Only 1 path after union - holes may have collapsed!');
+      }
+    }
+    
+    if (unionPaths.length === 0) {
+      console.warn('⚠️ Union produced empty PolyTree; returning original item');
+      return item;
+    }
+    
+    // Step 3: Apply offset to the PolyTree
+    const offsetTree = clipperOffsetPolyTree(unionTree, offsetClipperUnits);
+    
+    // Validation: Convert to paths to count
+    const offsetPaths = ClipperLib.Clipper.PolyTreeToPaths(offsetTree);
+    
+    if (debug) {
+      console.log(`✓ Offset PolyTree created with ${offsetPaths.length} path(s)`);
+      
+      // Hole preservation check
+      if (unionPaths.length > 1 && offsetPaths.length === 1) {
+        console.warn('  ⚠️ WARNING: Holes may have collapsed during offset!');
+      }
+    }
+    
+    if (offsetPaths.length === 0) {
+      console.warn('⚠️ Offset produced empty result; returning original item');
+      return item;
+    }
+    
+    // Step 4: Convert back to Paper.js CompoundPath with EvenOdd fill rule
+    const strengthenedItem = polyTreeToPaperCompoundPath(offsetTree);
+    
+    if (debug) {
+      console.log(`✓ Converted to Paper.js CompoundPath with ${strengthenedItem.children.length} child path(s)`);
+      console.log(`  fillRule: ${strengthenedItem.fillRule}`);
+      console.log('🔧 === STRENGTHEN OFFSET COMPLETE ===\n');
+    }
+    
+    return strengthenedItem;
+    
+  } catch (error) {
+    console.error('❌ Strengthen offset error:', error);
+    console.error('Stack:', error.stack);
+    console.warn('⚠️ Returning original item due to error');
+    return item;
+  }
+}
+
+// Generate preview with opentype.js paths
+function generatePreview() {
+  const name = nameInput.value;
+  
+  if (!name || name.trim().length === 0 || !pacificoFont) {
+    namePath.setAttribute('d', '');
+    downloadBtn.disabled = true;
+    return;
+  }
+  
+  try {
+    // Apply Paper.js operations if weld is enabled
+    let finalPathData;
+    if (currentSettings.weldPaths) {
+      finalPathData = applyPaperJsUnion(name, currentSettings.fontSize, currentSettings.letterSpacing, currentSettings.pairSpacingMap);
+    } else {
+      const result = generatePathWithKerning(name, currentSettings.fontSize, currentSettings.letterSpacing, false, currentSettings.pairSpacingMap);
+      finalPathData = result.pathData;
+    }
+    
+    // Update the path element
+    namePath.setAttribute('d', finalPathData);
+    
+    // Auto-fit preview viewBox (center and fit the design with padding)
+    autoFitViewBox();
+    
+    // Enable download button
+    downloadBtn.disabled = false;
+  } catch (error) {
+    console.error('Error generating preview:', error);
+    // Show error in status bar
+    statusBar.className = 'status-bar error';
+    statusText.textContent = `Preview Error: ${error.message}`;
+    // Disable download button on error
+    downloadBtn.disabled = true;
+  }
+}
+
+/**
+ * Parse pair spacing overrides from textarea input
+ * Format: "AB=-0.90" where AB is the two-character pair and -0.90 is the spacing in em
+ * @param {string} input - Raw textarea content
+ * @returns {Object} - {map: Object, warnings: Array}
+ */
+function parsePairSpacingMap(input) {
+  const map = {};
+  const warnings = [];
+  
+  if (!input || input.trim().length === 0) {
+    return { map, warnings };
+  }
+  
+  const lines = input.split('\n');
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    
+    // Skip empty lines and comments
+    if (line.length === 0 || line.startsWith('#') || line.startsWith('//')) {
+      continue;
+    }
+    
+    // Expected format: "AB=-0.90" or "AB = -0.90"
+    const match = line.match(/^(.{2})\s*=\s*(-?\d+\.?\d*)$/);
+    
+    if (!match) {
+      warnings.push(`Line ${i + 1}: Invalid format "${line}"`);
+      continue;
+    }
+    
+    const pairKey = match[1];
+    const spacingValue = parseFloat(match[2]);
+    
+    if (isNaN(spacingValue)) {
+      warnings.push(`Line ${i + 1}: Invalid number "${match[2]}"`);
+      continue;
+    }
+    
+    // Check if pair key is exactly 2 characters
+    if (pairKey.length !== 2) {
+      warnings.push(`Line ${i + 1}: Pair must be exactly 2 characters`);
+      continue;
+    }
+    
+    map[pairKey] = spacingValue;
+  }
+  
+  return { map, warnings };
+}
+
+/**
+ * Layout text with pair-specific spacing overrides
+ * This function computes glyph placements considering:
+ * - OpenType kerning
+ * - Default letter spacing
+ * - Pair-specific spacing overrides
+ * 
+ * @param {Object} font - opentype.js font object
+ * @param {string} text - Text to layout
+ * @param {number} fontSizePx - Font size in pixels
+ * @param {number} defaultSpacingEm - Default letter spacing in em units
+ * @param {Object} pairSpacingMap - Map of "AB" -> spacing in em units
+ * @returns {Array} - Array of {glyph, x, y} objects
+ * 
+ * TEST ASSERTIONS:
+ * 
+ * Test 1: Empty pair map should match old uniform-spacing output
+ * - Input: text="AB", fontSize=80, defaultSpacing=-0.5, pairMap={}
+ * - Expected: All pairs use -0.5em spacing
+ * - Verification: x positions should match legacy generatePathWithKerning (within 0.1px)
+ * 
+ * Test 2: Pair override changes specific gap
+ * - Input: text="ABC", fontSize=80, defaultSpacing=-0.5, pairMap={"AB": -0.8}
+ * - Expected: Gap between A-B uses -0.8em, B-C uses -0.5em
+ * - Verification: Distance(A,B) ≠ Distance(B,C) by expected delta
+ * 
+ * Test 3: Unknown pairs fall back to default
+ * - Input: text="XYZ", fontSize=80, defaultSpacing=-0.3, pairMap={"AB": -0.9}
+ * - Expected: All XY, YZ pairs use -0.3em (fallback)
+ * - Verification: No pair uses -0.9em since "AB" not present in text
+ */
+function layoutTextWithPairSpacing(font, text, fontSizePx, defaultSpacingEm, pairSpacingMap) {
+  if (!font || !text || text.length === 0) {
+    return { placements: [], glyphBounds: [] };
+  }
+  
+  const placements = [];
+  const glyphBounds = []; // Store bounding box for each glyph
+  const scale = fontSizePx / font.unitsPerEm;
+  const baselineY = 0; // Baseline at y=0
+  
+  let x = 0; // Current x position
+  
+  // Debug logging
+  const debugLog = [];
+  
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const glyph = font.charToGlyph(char);
+    
+    // Place current glyph at current x position
+    placements.push({
+      glyph: glyph,
+      char: char,
+      x: x,
+      y: baselineY
+    });
+    
+    // Compute glyph bounds (for anchor region filtering)
+    // getPath() and getBoundingBox() give us the actual glyph outline bounds
+    const glyphPath = glyph.getPath(x, baselineY, fontSizePx);
+    const glyphBBox = glyphPath.getBoundingBox();
+    
+    // Store bounds (x1, y1, x2, y2) or null for empty glyphs (e.g., spaces)
+    if (glyphBBox.x1 !== undefined && glyphBBox.x2 !== undefined) {
+      glyphBounds.push({
+        x1: glyphBBox.x1,
+        y1: glyphBBox.y1,
+        x2: glyphBBox.x2,
+        y2: glyphBBox.y2,
+        char: char,
+        index: i
+      });
+    } else {
+      glyphBounds.push(null); // Space or empty glyph
+    }
+    
+    // Calculate advance for next glyph
+    const glyphAdvance = glyph.advanceWidth * scale;
+    
+    // If there's a next character, apply kerning and spacing
+    if (i < text.length - 1) {
+      const nextChar = text[i + 1];
+      const nextGlyph = font.charToGlyph(nextChar);
+      
+      // 1. Apply OpenType kerning
+      const kerningValue = font.getKerningValue(glyph, nextGlyph) * scale;
+      
+      // 2. Determine spacing for this pair
+      const pairKey = char + nextChar;
+      let spacingEm = defaultSpacingEm;
+      
+      // Check if pair override exists
+      if (pairSpacingMap.hasOwnProperty(pairKey)) {
+        spacingEm = pairSpacingMap[pairKey];
+      }
+      
+      const spacingPx = spacingEm * fontSizePx;
+      
+      // 3. Total advance = glyph advance + kerning + spacing
+      const totalAdvance = glyphAdvance + kerningValue + spacingPx;
+      
+      // Debug logging
+      debugLog.push({
+        pair: pairKey,
+        kerning: kerningValue.toFixed(2),
+        spacingEm: spacingEm.toFixed(3),
+        spacingPx: spacingPx.toFixed(2),
+        advance: glyphAdvance.toFixed(2),
+        total: totalAdvance.toFixed(2),
+        x: x.toFixed(2)
+      });
+      
+      x += totalAdvance;
+    } else {
+      // Last character - just add its advance
+      x += glyphAdvance;
+      
+      debugLog.push({
+        pair: char + '(end)',
+        kerning: '0.00',
+        spacingEm: '0.000',
+        spacingPx: '0.00',
+        advance: glyphAdvance.toFixed(2),
+        total: glyphAdvance.toFixed(2),
+        x: x.toFixed(2)
+      });
+    }
+  }
+  
+  // Console debug output
+  if (window.DEBUG_PAIR_SPACING) {
+    console.table(debugLog);
+  }
+  
+  return { placements, glyphBounds };
+}
+
+/**
+ * Build SVG path data from glyph placements
+ * @param {Array} placements - Array of {glyph, x, y} from layoutTextWithPairSpacing
+ * @param {number} fontSizePx - Font size in pixels
+ * @returns {string} - SVG path data
+ */
+function buildPathFromPlacements(placements, fontSizePx) {
+  let pathData = '';
+  
+  for (const placement of placements) {
+    const glyphPath = placement.glyph.getPath(placement.x, placement.y, fontSizePx);
+    
+    // Append glyph path commands
+    const commands = glyphPath.commands;
+    for (const cmd of commands) {
+      switch (cmd.type) {
+        case 'M':
+          pathData += `M${cmd.x.toFixed(2)},${cmd.y.toFixed(2)} `;
+          break;
+        case 'L':
+          pathData += `L${cmd.x.toFixed(2)},${cmd.y.toFixed(2)} `;
+          break;
+        case 'Q':
+          pathData += `Q${cmd.x1.toFixed(2)},${cmd.y1.toFixed(2)} ${cmd.x.toFixed(2)},${cmd.y.toFixed(2)} `;
+          break;
+        case 'C':
+          pathData += `C${cmd.x1.toFixed(2)},${cmd.y1.toFixed(2)} ${cmd.x2.toFixed(2)},${cmd.y2.toFixed(2)} ${cmd.x.toFixed(2)},${cmd.y.toFixed(2)} `;
+          break;
+        case 'Z':
+          pathData += 'Z ';
+          break;
+      }
+    }
+  }
+  
+  return pathData.trim();
+}
+
+/**
+ * Generate SVG path with kerning and letter spacing (with pair-specific overrides)
+ * Returns either a single path string or an array of individual letter paths
+ * 
+ * @param {string} text - Text to render
+ * @param {number} fontSize - Font size in pixels
+ * @param {number} letterSpacing - Default letter spacing in em units
+ * @param {boolean} separateLetters - If true, return array of individual letter paths
+ * @param {Object} pairSpacingMap - Optional pair-specific spacing overrides
+ * @returns {string|Array} - SVG path data or array of path data strings
+ */
+function generatePathWithKerning(text, fontSize, letterSpacing, separateLetters = false, pairSpacingMap = {}) {
+  if (!pacificoFont || !text) {
+    const emptyResult = separateLetters ? [] : '';
+    return { pathData: emptyResult, glyphBounds: [] };
+  }
+  
+  // Use the new pair-aware layout system
+  const { placements, glyphBounds } = layoutTextWithPairSpacing(
+    pacificoFont, 
+    text, 
+    fontSize, 
+    letterSpacing, 
+    pairSpacingMap
+  );
+  
+  if (placements.length === 0) {
+    const emptyResult = separateLetters ? [] : '';
+    return { pathData: emptyResult, glyphBounds: [] };
+  }
+  
+  // If separateLetters is true, return array of individual letter paths
+  if (separateLetters) {
+    const letterPaths = [];
+    
+    for (const placement of placements) {
+      const glyph = placement.glyph;
+      const glyphPath = glyph.getPath(placement.x, placement.y, fontSize);
+      
+      let pathData = '';
+      const commands = glyphPath.commands;
+      for (const cmd of commands) {
+        switch (cmd.type) {
+          case 'M':
+            pathData += `M${cmd.x.toFixed(2)},${cmd.y.toFixed(2)} `;
+            break;
+          case 'L':
+            pathData += `L${cmd.x.toFixed(2)},${cmd.y.toFixed(2)} `;
+            break;
+          case 'Q':
+            pathData += `Q${cmd.x1.toFixed(2)},${cmd.y1.toFixed(2)} ${cmd.x.toFixed(2)},${cmd.y.toFixed(2)} `;
+            break;
+          case 'C':
+            pathData += `C${cmd.x1.toFixed(2)},${cmd.y1.toFixed(2)} ${cmd.x2.toFixed(2)},${cmd.y2.toFixed(2)} ${cmd.x.toFixed(2)},${cmd.y.toFixed(2)} `;
+            break;
+          case 'Z':
+            pathData += 'Z ';
+            break;
+        }
+      }
+      
+      letterPaths.push(pathData.trim());
+    }
+    
+    return { pathData: letterPaths, glyphBounds };
+  }
+  
+  // Build combined path data using the new helper function
+  const combinedPath = buildPathFromPlacements(placements, fontSize);
+  return { pathData: combinedPath, glyphBounds };
+}
+
+// Reset viewBox to fit the path content
+/**
+ * Auto-fit the preview viewBox to center and fit the design with padding.
+ * Called automatically after every design update.
+ */
+function autoFitViewBox() {
+  const name = nameInput.value;
+  if (!name || name.trim().length === 0 || !pacificoFont) return;
+  
+  try {
+    // Get the bounding box of the rendered path
+    const bbox = namePath.getBBox();
+    
+    // Guard against empty or invalid bounds
+    if (bbox.width === 0 || bbox.height === 0) {
+      console.warn('Cannot auto-fit viewBox: path has no dimensions');
+      return;
+    }
+    
+    // Add 10% padding around the content for visual breathing room
+    const padding = Math.max(bbox.width, bbox.height) * 0.1;
+    const newX = bbox.x - padding;
+    const newY = bbox.y - padding;
+    const newWidth = bbox.width + (padding * 2);
+    const newHeight = bbox.height + (padding * 2);
+    
+    // Update SVG viewBox to center and fit the design
+    previewSvg.setAttribute('viewBox', `${newX.toFixed(2)} ${newY.toFixed(2)} ${newWidth.toFixed(2)} ${newHeight.toFixed(2)}`);
+    
+    if (currentSettings.debugMode) {
+      console.log('✓ Auto-fit viewBox:', `${newX.toFixed(2)} ${newY.toFixed(2)} ${newWidth.toFixed(2)} ${newHeight.toFixed(2)}`);
+    }
+  } catch (error) {
+    console.error('Error auto-fitting viewBox:', error);
+  }
+}
+
+// Download SVG file
+downloadBtn.addEventListener('click', () => {
+  const name = nameInput.value.trim();
+  if (!name || !pacificoFont) return;
+  
+  // Create a clean SVG for laser cutting
+  const svgContent = generateLaserCutSVG(name);
+  
+  // Create blob and download
+  const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${name.replace(/\s+/g, '_')}_necklace.svg`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+  
+  console.log('✓ SVG downloaded:', link.download);
+});
+
+// Generate laser-cut friendly SVG with proper mm scaling
+function generateLaserCutSVG(name) {
+  if (!pacificoFont) return '';
+  
+  // Generate path with current settings (in px coordinates)
+  // Apply Paper.js union if enabled
+  let pathData;
+  if (currentSettings.weldPaths) {
+    pathData = applyPaperJsUnion(name, currentSettings.fontSize, currentSettings.letterSpacing, currentSettings.pairSpacingMap);
+  } else {
+    const result = generatePathWithKerning(name, currentSettings.fontSize, currentSettings.letterSpacing, false, currentSettings.pairSpacingMap);
+    pathData = result.pathData;
+  }
+  
+  // Calculate bounding box from the path (in px)
+  // Create a temporary SVG to measure
+  const tempSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  tempSvg.style.position = 'absolute';
+  tempSvg.style.visibility = 'hidden';
+  document.body.appendChild(tempSvg);
+  
+  const tempPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  tempPath.setAttribute('d', pathData);
+  tempSvg.appendChild(tempPath);
+  
+  const bbox = tempPath.getBBox();
+  document.body.removeChild(tempSvg);
+  
+  // Original dimensions in px (from font rendering)
+  const originalWidthPx = bbox.width;
+  const originalHeightPx = bbox.height;
+  
+  // Calculate scale factor to match target height in mm
+  // 1. Convert original height from px to mm using 96 DPI standard
+  const originalHeightMm = originalHeightPx * MM_PER_PX;
+  
+  // 2. Calculate scale factor to reach target height
+  const scaleFactor = currentSettings.targetHeight / originalHeightMm;
+  
+  // 3. Calculate final dimensions in mm
+  const finalHeightMm = currentSettings.targetHeight;
+  const finalWidthMm = (originalWidthPx * MM_PER_PX) * scaleFactor;
+  
+  // 4. Add padding in mm
+  const paddingMm = 2;  // 2mm padding
+  const totalWidthMm = finalWidthMm + (paddingMm * 2);
+  const totalHeightMm = finalHeightMm + (paddingMm * 2);
+  
+  // 5. Create viewBox that includes the path with padding
+  // ViewBox is in the original px coordinate system
+  const viewBoxX = bbox.x - (paddingMm / MM_PER_PX / scaleFactor);
+  const viewBoxY = bbox.y - (paddingMm / MM_PER_PX / scaleFactor);
+  const viewBoxWidth = originalWidthPx + (2 * paddingMm / MM_PER_PX / scaleFactor);
+  const viewBoxHeight = originalHeightPx + (2 * paddingMm / MM_PER_PX / scaleFactor);
+  
+  // Generate clean SVG for laser cutting with filled path
+  // The width/height in mm define the physical size
+  // The viewBox defines the coordinate system (in px from the font)
+  // The browser/laser cutter scales the viewBox content to fit the mm dimensions
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg width="${totalWidthMm.toFixed(2)}mm" height="${totalHeightMm.toFixed(2)}mm" viewBox="${viewBoxX.toFixed(2)} ${viewBoxY.toFixed(2)} ${viewBoxWidth.toFixed(2)} ${viewBoxHeight.toFixed(2)}" xmlns="http://www.w3.org/2000/svg">
+  <!-- 
+    Width/Height: Physical dimensions for laser cutting (in mm)
+    ViewBox: Original font coordinate system (in px at 96 DPI)
+    Target height: ${currentSettings.targetHeight}mm (scale factor: ${scaleFactor.toFixed(4)}x)
+  -->
+  <path 
+    d="${pathData}" 
+    fill="#000000"
+    fill-rule="evenodd"
+  />
+</svg>`;
+  
+  return svg;
+}
+
+/**
+ * Convert millimeters to Paper.js units
+ * Paper.js uses the same coordinate system as our SVG (px at 96 DPI)
+ * @param {number} mm - Value in millimeters
+ * @returns {number} - Value in Paper.js units (px)
+ */
+function mmToPaperUnits(mm) {
+  // Using the same conversion as our main pipeline
+  // 1 mm = 96 / 25.4 px ≈ 3.7795 px
+  return mm * PX_PER_MM;
+}
+
+/**
+ * Extract all individual paths from a Paper.js item
+ * Recursively flattens Groups and CompoundPaths into an array of simple Paths
+ * @param {paper.Item} item - Paper.js item to flatten
+ * @returns {Array<paper.Path>} - Array of individual path objects
+ */
+function extractAllPaths(item) {
+  const paths = [];
+  
+  function traverse(obj) {
+    if (obj instanceof paper.Path) {
+      paths.push(obj);
+    } else if (obj instanceof paper.CompoundPath) {
+      // CompoundPath has children that are Paths
+      obj.children.forEach(child => traverse(child));
+    } else if (obj instanceof paper.Group) {
+      // Group can contain any items
+      obj.children.forEach(child => traverse(child));
+    }
+  }
+  
+  traverse(item);
+  return paths;
+}
+
+/**
+ * Connect i-dots to stems by moving dots downward to create overlap
+ * This prevents dots from falling out during laser cutting
+ * 
+ * @param {paper.Item} paperItem - The imported Paper.js item containing all text paths
+ * @param {Object} options - Configuration options
+ * @param {boolean} options.enabled - Whether to apply this transformation
+ * @param {number} options.overlapMm - Desired overlap in mm
+ * @param {number} options.maxShiftMm - Maximum downward shift in mm
+ * @param {number} options.searchRadiusMm - Search radius for matching stems in mm
+ * 
+ * REGRESSION TEST:
+ * Input "Mia" should produce:
+ * - One dot detected above the i stem
+ * - Dot moved down to overlap stem
+ * - After union: single connected shape with no loose dot
+ */
+
+/**
+ * Adds attachment loops to the text
+ * 
+ * Creates donut-shaped loops (outer circle minus inner circle) at the leftmost and rightmost
+ * top edges of the text bounding box, suitable for attaching a chain to the necklace.
+ * 
+ * @param {paper.Group} paperGroup - Group containing all text paths
+ * @param {Object} options - Loop generation options
+ * @param {number} options.innerDiameterMm - Inner diameter of loop in mm
+ * @param {number} options.offsetMm - Distance from text bounds to loop in mm
+ * @param {number} options.minThicknessMm - Minimum thickness of loop material (default 0.8mm)
+ * @returns {Array<paper.CompoundPath>} Array of loop paths (left and right)
+ */
+/**
+ * Attach loops to the ends of text outline using robust geometry sampling.
+ * This ensures loops always overlap and weld properly.
+ * 
+ * @param {paper.Item} textItem - The welded text shape (Path, CompoundPath, or Group)
+ * @param {Object} options - Loop configuration
+ * @param {boolean} debugMode - Enable debug visualization and logging
+ * @returns {paper.Item} The text with loops attached and welded
+ */
+function attachLoopsToEnds(textItem, options = {}, debugMode = false) {
+  const {
+    innerDiameterMm = 3.0,
+    outerDiameterMm = 4.6,
+    offsetFromTextMm = 0.6,
+    loopOverlapMm = 0.4,  // How much the loop's OUTER ring overlaps the text
+    glyphBounds = null    // Array of glyph bounding boxes for anchor region filtering
+  } = options;
+  
+  console.log('🔵 Attaching loops to text ends using geometry sampling...');
+  if (debugMode) {
+    console.log('  Options:', { innerDiameterMm, outerDiameterMm, offsetFromTextMm, loopOverlapMm });
+  }
+  
+  // Calculate dimensions in Paper.js units (px)
+  const innerRadiusPx = (innerDiameterMm / 2) * PX_PER_MM;
+  const outerRadiusPx = (outerDiameterMm / 2) * PX_PER_MM;
+  const outerRadiusMm = outerDiameterMm / 2;  // For margin calculation in findAnchorPoints
+  const thicknessMm = (outerDiameterMm - innerDiameterMm) / 2;
+  const offsetPx = offsetFromTextMm * PX_PER_MM;
+  const overlapPx = loopOverlapMm * PX_PER_MM;
+  const sampleStepMm = 0.5; // Sample every 0.5mm
+  const sampleStepPx = sampleStepMm * PX_PER_MM;
+  
+  if (debugMode) {
+    console.log('  Calculated dimensions:');
+    console.log(`    Inner diameter: ${innerDiameterMm}mm (radius: ${innerRadiusPx.toFixed(2)}px)`);
+    console.log(`    Outer diameter: ${outerDiameterMm}mm (radius: ${outerRadiusPx.toFixed(2)}px)`);
+    console.log(`    Loop thickness: ${thicknessMm.toFixed(2)}mm`);
+    console.log(`    Offset from text: ${offsetPx.toFixed(2)}px (${offsetFromTextMm}mm)`);
+    console.log(`    Target overlap: ${overlapPx.toFixed(2)}px (${loopOverlapMm}mm)`);
+    console.log(`    Sample step: ${sampleStepPx.toFixed(2)}px (${sampleStepMm}mm)`);
+  }
+  
+  // STEP 1: Find anchor points on the text outline
+  const anchors = findAnchorPoints(textItem, sampleStepPx, debugMode, glyphBounds, outerRadiusMm);
+  
+  if (!anchors.left || !anchors.right) {
+    console.error('❌ Could not find anchor points on text outline');
+    return textItem;
+  }
+  
+  if (debugMode) {
+    console.log('  Found anchor points:');
+    console.log(`    Left:  (${anchors.left.point.x.toFixed(2)}, ${anchors.left.point.y.toFixed(2)})`);
+    console.log(`    Right: (${anchors.right.point.x.toFixed(2)}, ${anchors.right.point.y.toFixed(2)})`);
+  }
+  
+  // STEP 2: Create and attach left loop
+  const leftLoop = createAndPlaceLoop({
+    anchorPoint: anchors.left.point,
+    outwardDir: anchors.left.outwardDir,
+    innerRadiusPx,
+    outerRadiusPx,
+    offsetPx,
+    overlapPx,
+    textItem,
+    side: 'left',
+    debugMode
+  });
+  
+  // STEP 3: Weld left loop to text
+  if (leftLoop) {
+    try {
+      const newTextItem = textItem.unite(leftLoop);
+      if (newTextItem) {
+        textItem.remove();
+        leftLoop.remove();
+        textItem = newTextItem;
+        console.log('  ✓ Left loop welded successfully');
+      } else {
+        console.warn('  ⚠️ Left loop unite returned null');
+        leftLoop.remove();
+      }
+    } catch (error) {
+      console.error('  ❌ Error welding left loop:', error);
+      leftLoop.remove();
+    }
+  }
+  
+  // STEP 4: Create and attach right loop
+  const rightLoop = createAndPlaceLoop({
+    anchorPoint: anchors.right.point,
+    outwardDir: anchors.right.outwardDir,
+    innerRadiusPx,
+    outerRadiusPx,
+    offsetPx,
+    overlapPx,
+    textItem,
+    side: 'right',
+    debugMode
+  });
+  
+  // STEP 5: Weld right loop to text
+  if (rightLoop) {
+    try {
+      const newTextItem = textItem.unite(rightLoop);
+      if (newTextItem) {
+        textItem.remove();
+        rightLoop.remove();
+        textItem = newTextItem;
+        console.log('  ✓ Right loop welded successfully');
+      } else {
+        console.warn('  ⚠️ Right loop unite returned null');
+        rightLoop.remove();
+      }
+    } catch (error) {
+      console.error('  ❌ Error welding right loop:', error);
+      rightLoop.remove();
+    }
+  }
+  
+  // STEP 6: Validate connectivity
+  const componentCount = countComponents(textItem);
+  if (componentCount > 1) {
+    console.warn(`⚠️ Warning: Final design has ${componentCount} separate components. Loops may not be fully attached.`);
+    console.warn('   Try increasing "Loop Overlap" or reducing "Loop Offset from Text".');
+  } else {
+    console.log(`✅ Final design is a single connected component`);
+  }
+  
+  console.log('✅ Loop attachment complete');
+  
+  return textItem;
+}
+
+/**
+ * Find anchor points on the text outline for loop attachment
+ * @param {paper.Item} textItem - The text shape
+ * @param {number} sampleStepPx - Step size for sampling points along paths
+ * @param {boolean} debugMode - Enable debug logging
+ * @param {Array} glyphBounds - Array of {x1,y1,x2,y2,char,index} for each glyph
+ * @param {number} outerRadiusMm - Outer radius of loop for margin calculation
+ */
+function findAnchorPoints(textItem, sampleStepPx, debugMode, glyphBounds = null, outerRadiusMm = 0) {
+  if (debugMode) {
+    console.log('  📍 Sampling points along text outline...');
+  }
+  
+  // Get all leaf paths
+  const paths = extractAllPaths(textItem);
+  
+  if (paths.length === 0) {
+    console.error('    ❌ No paths found in text item');
+    return { left: null, right: null };
+  }
+  
+  // Sample points along all paths
+  const sampledPoints = [];
+  const flattenTolerance = 0.2 * PX_PER_MM; // 0.2mm tolerance
+  
+  for (const path of paths) {
+    // Flatten path for stable sampling
+    const flattened = path.clone();
+    flattened.flatten(flattenTolerance);
+    
+    const pathLength = flattened.length;
+    const numSamples = Math.ceil(pathLength / sampleStepPx);
+    
+    for (let i = 0; i <= numSamples; i++) {
+      const offset = (i / numSamples) * pathLength;
+      const point = flattened.getPointAt(offset);
+      if (point) {
+        sampledPoints.push(point);
+      }
+    }
+    
+    flattened.remove();
+  }
+  
+  if (debugMode) {
+    console.log(`    Sampled ${sampledPoints.length} points from ${paths.length} paths`);
+  }
+  
+  if (sampledPoints.length === 0) {
+    console.error('    ❌ No points sampled');
+    return { left: null, right: null };
+  }
+  
+  // ============================================================================
+  // QUANTILE-BASED ANCHOR SELECTION (robust for descenders)
+  // ============================================================================
+  // Instead of using bounds height (which fails with descenders like "Sophia"),
+  // we use Y-quantiles to find points in the TOP ENVELOPE of the text.
+  // Paper.js: smaller Y = higher position
+  
+  // ============================================================================
+  // GLYPH-REGION FILTERING FIRST (prevents "i-dot steals anchor" bug)
+  // ============================================================================
+  // NEW APPROACH: Filter by glyph region FIRST, then apply quantile selection WITHIN each region.
+  // This ensures anchors are always from the correct glyphs, even if those glyphs are lower than the global top quantile.
+  
+  let leftRegionPoints = sampledPoints;
+  let rightRegionPoints = sampledPoints;
+  let firstRect = null;
+  let lastRect = null;
+  
+  if (glyphBounds && glyphBounds.length > 0) {
+    // Find first and last non-null glyph bounds
+    const firstGlyphBounds = glyphBounds.find(b => b !== null);
+    const lastGlyphBounds = [...glyphBounds].reverse().find(b => b !== null);
+    
+    if (firstGlyphBounds && lastGlyphBounds) {
+      // Calculate margin: generous so we capture terminal flourishes
+      const marginMm = Math.max(2.0, outerRadiusMm);
+      const marginPx = marginMm * PX_PER_MM;
+      
+      // Create rectangles for first and last glyph regions (with margin)
+      firstRect = new paper.Rectangle(
+        firstGlyphBounds.x1 - marginPx,
+        firstGlyphBounds.y1 - marginPx,
+        (firstGlyphBounds.x2 - firstGlyphBounds.x1) + 2 * marginPx,
+        (firstGlyphBounds.y2 - firstGlyphBounds.y1) + 2 * marginPx
+      );
+      
+      lastRect = new paper.Rectangle(
+        lastGlyphBounds.x1 - marginPx,
+        lastGlyphBounds.y1 - marginPx,
+        (lastGlyphBounds.x2 - lastGlyphBounds.x1) + 2 * marginPx,
+        (lastGlyphBounds.y2 - lastGlyphBounds.y1) + 2 * marginPx
+      );
+      
+      // Filter points by glyph region FIRST
+      leftRegionPoints = sampledPoints.filter(p => firstRect.contains(p));
+      rightRegionPoints = sampledPoints.filter(p => lastRect.contains(p));
+      
+      if (debugMode) {
+        console.log(`    Glyph-region filtering FIRST (margin: ${marginMm.toFixed(1)}mm):`);
+        console.log(`      First glyph "${firstGlyphBounds.char}": ${leftRegionPoints.length} points`);
+        console.log(`      Last glyph "${lastGlyphBounds.char}": ${rightRegionPoints.length} points`);
+      }
+      
+      // If too few points, expand margin before applying quantiles
+      const minPointsPerRegion = 20;
+      if (leftRegionPoints.length < minPointsPerRegion || rightRegionPoints.length < minPointsPerRegion) {
+        const marginsToTry = [4.0, 6.0, 8.0, 10.0];
+        
+        for (const tryMarginMm of marginsToTry) {
+          if (leftRegionPoints.length >= minPointsPerRegion && rightRegionPoints.length >= minPointsPerRegion) {
+            break;
+          }
+          
+          const tryMarginPx = tryMarginMm * PX_PER_MM;
+          
+          if (leftRegionPoints.length < minPointsPerRegion) {
+            const expandedFirstRect = new paper.Rectangle(
+              firstGlyphBounds.x1 - tryMarginPx,
+              firstGlyphBounds.y1 - tryMarginPx,
+              (firstGlyphBounds.x2 - firstGlyphBounds.x1) + 2 * tryMarginPx,
+              (firstGlyphBounds.y2 - firstGlyphBounds.y1) + 2 * tryMarginPx
+            );
+            leftRegionPoints = sampledPoints.filter(p => expandedFirstRect.contains(p));
+            firstRect = expandedFirstRect;
+          }
+          
+          if (rightRegionPoints.length < minPointsPerRegion) {
+            const expandedLastRect = new paper.Rectangle(
+              lastGlyphBounds.x1 - tryMarginPx,
+              lastGlyphBounds.y1 - tryMarginPx,
+              (lastGlyphBounds.x2 - lastGlyphBounds.x1) + 2 * tryMarginPx,
+              (lastGlyphBounds.y2 - lastGlyphBounds.y1) + 2 * tryMarginPx
+            );
+            rightRegionPoints = sampledPoints.filter(p => expandedLastRect.contains(p));
+            lastRect = expandedLastRect;
+          }
+          
+          if (debugMode) {
+            console.log(`      Expanded margin to ${tryMarginMm}mm: Left=${leftRegionPoints.length}, Right=${rightRegionPoints.length}`);
+          }
+        }
+      }
+      
+      // Debug visualization: Draw glyph boxes
+      if (debugMode && window.DEBUG_LOOP_ANCHORS && firstRect && lastRect) {
+        // Draw first glyph box (red)
+        new paper.Path.Rectangle({
+          rectangle: firstRect,
+          strokeColor: 'rgba(255,0,0,0.5)',
+          strokeWidth: 0.5,
+          name: 'debugGlyphBoxFirst'
+        });
+        
+        // Draw last glyph box (blue)
+        new paper.Path.Rectangle({
+          rectangle: lastRect,
+          strokeColor: 'rgba(0,0,255,0.5)',
+          strokeWidth: 0.5,
+          name: 'debugGlyphBoxLast'
+        });
+      }
+    }
+  }
+  
+  // ============================================================================
+  // QUANTILE SELECTION WITHIN EACH REGION
+  // ============================================================================
+  // Apply quantile-based filtering separately within left and right regions
+  
+  // Helper: Get Y value at quantile for a set of points
+  const getYQuantileForPoints = (points, q) => {
+    if (points.length === 0) return null;
+    const yValues = points.map(p => p.y);
+    yValues.sort((a, b) => a - b);
+    const index = Math.floor(q * (yValues.length - 1));
+    return yValues[Math.max(0, Math.min(index, yValues.length - 1))];
+  };
+  
+  // Select top candidates from left region
+  let leftCandidates = [];
+  if (leftRegionPoints.length > 0) {
+    const quantilesToTry = [0.30, 0.40, 0.50, 0.75, 1.0];  // Start at 30% since we already filtered by region
+    for (const q of quantilesToTry) {
+      const yThreshold = getYQuantileForPoints(leftRegionPoints, q);
+      leftCandidates = leftRegionPoints.filter(p => p.y <= yThreshold);
+      if (debugMode) {
+        console.log(`      Left region quantile ${(q * 100).toFixed(0)}%: ${leftCandidates.length} candidates`);
+      }
+      if (leftCandidates.length >= 10 || q === 1.0) break;
+    }
+  }
+  
+  // Select top candidates from right region
+  let rightCandidates = [];
+  if (rightRegionPoints.length > 0) {
+    const quantilesToTry = [0.30, 0.40, 0.50, 0.75, 1.0];
+    for (const q of quantilesToTry) {
+      const yThreshold = getYQuantileForPoints(rightRegionPoints, q);
+      rightCandidates = rightRegionPoints.filter(p => p.y <= yThreshold);
+      if (debugMode) {
+        console.log(`      Right region quantile ${(q * 100).toFixed(0)}%: ${rightCandidates.length} candidates`);
+      }
+      if (rightCandidates.length >= 10 || q === 1.0) break;
+    }
+  }
+  
+  // Fallback if still no candidates
+  if (leftCandidates.length === 0) {
+    if (debugMode) console.log(`      ⚠️ No left candidates, using all left region points`);
+    leftCandidates = leftRegionPoints.length > 0 ? leftRegionPoints : sampledPoints;
+  }
+  if (rightCandidates.length === 0) {
+    if (debugMode) console.log(`      ⚠️ No right candidates, using all right region points`);
+    rightCandidates = rightRegionPoints.length > 0 ? rightRegionPoints : sampledPoints;
+  }
+  
+  if (debugMode) {
+    console.log(`    ✓ Final candidates: Left=${leftCandidates.length}, Right=${rightCandidates.length}`);
+  }
+  
+  // 3. Find leftmost and rightmost points from candidates
+  let leftPoint = leftCandidates[0];
+  let rightPoint = rightCandidates[0];
+  
+  for (const p of leftCandidates) {
+    if (p.x < leftPoint.x) leftPoint = p;
+  }
+  
+  for (const p of rightCandidates) {
+    if (p.x > rightPoint.x) rightPoint = p;
+  }
+  
+  if (debugMode) {
+    console.log(`    ✓ Final anchors: Left=(${leftPoint.x.toFixed(2)}, ${leftPoint.y.toFixed(2)}), Right=(${rightPoint.x.toFixed(2)}, ${rightPoint.y.toFixed(2)})`);
+  }
+  
+  // Calculate outward directions from text center
+  const center = textItem.bounds.center;
+  
+  const leftDir = leftPoint.subtract(center);
+  const leftOutward = leftDir.length > 0.01 ? leftDir.normalize() : new paper.Point(-1, 0);
+  
+  const rightDir = rightPoint.subtract(center);
+  const rightOutward = rightDir.length > 0.01 ? rightDir.normalize() : new paper.Point(1, 0);
+  
+  // Add debug visualization if enabled
+  if (debugMode && window.DEBUG_LOOP_ANCHORS) {
+    // Draw anchor points
+    const leftAnchorCircle = new paper.Path.Circle({
+      center: leftPoint,
+      radius: 2,
+      fillColor: 'red',
+      name: 'debugAnchorLeft'
+    });
+    
+    const rightAnchorCircle = new paper.Path.Circle({
+      center: rightPoint,
+      radius: 2,
+      fillColor: 'blue',
+      name: 'debugAnchorRight'
+    });
+    
+    // Draw outward direction arrows
+    const arrowLength = 20;
+    const leftArrow = new paper.Path.Line({
+      from: leftPoint,
+      to: leftPoint.add(leftOutward.multiply(arrowLength)),
+      strokeColor: 'red',
+      strokeWidth: 1,
+      name: 'debugArrowLeft'
+    });
+    
+    const rightArrow = new paper.Path.Line({
+      from: rightPoint,
+      to: rightPoint.add(rightOutward.multiply(arrowLength)),
+      strokeColor: 'blue',
+      strokeWidth: 1,
+      name: 'debugArrowRight'
+    });
+    
+    console.log('    🎨 Debug visualization: Red=left anchor, Blue=right anchor');
+  }
+  
+  return {
+    left: { point: leftPoint, outwardDir: leftOutward },
+    right: { point: rightPoint, outwardDir: rightOutward }
+  };
+}
+
+/**
+ * Create a loop and place it with verified overlap
+ */
+function createAndPlaceLoop(config) {
+  const {
+    anchorPoint,
+    outwardDir,
+    innerRadiusPx,
+    outerRadiusPx,
+    offsetPx,
+    overlapPx,
+    textItem,
+    side,
+    debugMode
+  } = config;
+  
+  if (debugMode) {
+    console.log(`  🔧 Creating ${side} loop...`);
+  }
+  
+  // Create donut loop geometry
+  const outerCircle = new paper.Path.Circle({
+    center: [0, 0],
+    radius: outerRadiusPx,
+    fillColor: 'black'
+  });
+  
+  const innerCircle = new paper.Path.Circle({
+    center: [0, 0],
+    radius: innerRadiusPx
+  });
+  
+  const loopRing = outerCircle.subtract(innerCircle);
+  outerCircle.remove();
+  innerCircle.remove();
+  loopRing.fillColor = 'black';
+  
+  // Calculate initial loop position
+  // We want the outer edge to overlap the text by overlapPx
+  // So center should be: anchor + outwardDir * (outerRadius - overlap + offset)
+  const baseOffset = outerRadiusPx - overlapPx + offsetPx;
+  const initialCenter = anchorPoint.add(outwardDir.multiply(baseOffset));
+  
+  loopRing.position = initialCenter;
+  
+  if (debugMode) {
+    console.log(`    Initial position: (${initialCenter.x.toFixed(2)}, ${initialCenter.y.toFixed(2)})`);
+    console.log(`    Outward direction: (${outwardDir.x.toFixed(3)}, ${outwardDir.y.toFixed(3)})`);
+  }
+  
+  // STEP: Verify overlap and adjust if needed
+  const overlapResult = ensureOverlap(loopRing, textItem, anchorPoint, outwardDir, overlapPx, debugMode);
+  
+  if (!overlapResult.hasOverlap) {
+    console.warn(`    ⚠️ ${side} loop: Could not achieve overlap, creating bridge tab...`);
+    
+    // Create bridge tab as fallback
+    const bridge = createBridgeTab(anchorPoint, loopRing.position, outerRadiusPx * 0.8, debugMode);
+    
+    if (bridge) {
+      const loopWithBridge = loopRing.unite(bridge);
+      loopRing.remove();
+      bridge.remove();
+      
+      if (loopWithBridge) {
+        loopWithBridge.fillColor = 'black';
+        return loopWithBridge;
+      }
+    }
+  }
+  
+  return loopRing;
+}
+
+/**
+ * Ensure the loop overlaps the text, adjusting position if needed
+ */
+function ensureOverlap(loopRing, textItem, anchorPoint, outwardDir, targetOverlapPx, debugMode) {
+  const maxSteps = 50;
+  const stepPull = 0.2 * PX_PER_MM; // Pull 0.2mm at a time
+  const minOverlapArea = 1.0; // Minimum area in px² to consider as overlap
+  
+  // Test current overlap
+  let overlapTest = loopRing.intersect(textItem, { insert: false });
+  let overlapArea = overlapTest ? Math.abs(overlapTest.area) : 0;
+  
+  if (debugMode) {
+    console.log(`    Initial overlap area: ${overlapArea.toFixed(2)}px²`);
+  }
+  
+  if (overlapArea > minOverlapArea) {
+    if (overlapTest) overlapTest.remove();
+    return { hasOverlap: true, finalOverlap: overlapArea };
+  }
+  
+  // No overlap - try pulling loop toward text
+  if (debugMode) {
+    console.log(`    No overlap detected, pulling loop toward text...`);
+  }
+  
+  const pullDir = outwardDir.multiply(-1); // Opposite of outward
+  
+  for (let step = 1; step <= maxSteps; step++) {
+    loopRing.position = loopRing.position.add(pullDir.multiply(stepPull));
+    
+    if (overlapTest) overlapTest.remove();
+    overlapTest = loopRing.intersect(textItem, { insert: false });
+    overlapArea = overlapTest ? Math.abs(overlapTest.area) : 0;
+    
+    if (overlapArea > minOverlapArea) {
+      if (debugMode) {
+        console.log(`    ✓ Overlap achieved after ${step} pull steps (area: ${overlapArea.toFixed(2)}px²)`);
+      }
+      if (overlapTest) overlapTest.remove();
+      return { hasOverlap: true, finalOverlap: overlapArea };
+    }
+  }
+  
+  if (overlapTest) overlapTest.remove();
+  
+  if (debugMode) {
+    console.log(`    ✗ Could not achieve overlap after ${maxSteps} steps`);
+  }
+  
+  return { hasOverlap: false, finalOverlap: 0 };
+}
+
+/**
+ * Create a bridge tab to connect loop to text
+ */
+function createBridgeTab(anchorPoint, loopCenter, bridgeWidth, debugMode) {
+  // Calculate bridge geometry
+  const direction = loopCenter.subtract(anchorPoint);
+  const bridgeLength = direction.length;
+  const angle = Math.atan2(direction.y, direction.x);
+  
+  if (debugMode) {
+    console.log(`    Creating bridge tab: length=${bridgeLength.toFixed(2)}px, angle=${(angle * 180 / Math.PI).toFixed(1)}°`);
+  }
+  
+  // Create rectangle centered between anchor and loop
+  const bridgeCenter = anchorPoint.add(loopCenter).divide(2);
+  const bridge = new paper.Path.Rectangle({
+    center: bridgeCenter,
+    size: [bridgeLength, bridgeWidth],
+    fillColor: 'black'
+  });
+  
+  // Rotate to align with direction
+  bridge.rotate(angle * 180 / Math.PI);
+  
+  return bridge;
+}
+
+/**
+ * Count the number of separate components in a Paper.js item
+ */
+function countComponents(item) {
+  if (item instanceof paper.CompoundPath) {
+    return item.children.length;
+  } else if (item instanceof paper.Group) {
+    // Count all paths in group
+    let count = 0;
+    for (const child of item.children) {
+      if (child instanceof paper.Path || child instanceof paper.CompoundPath) {
+        count++;
+      }
+    }
+    return count;
+  } else if (item instanceof paper.Path) {
+    return 1;
+  }
+  return 0;
+}
+
+function generateLoops(paperGroup, options = {}, debugMode = false) {
+  const {
+    innerDiameterMm = 3.0,
+    offsetMm = 0.6,
+    minThicknessMm = 0.8
+  } = options;
+  
+  console.log('🔵 Generating attachment loops...');
+  console.log(`  Inner diameter: ${innerDiameterMm}mm`);
+  console.log(`  Offset from text: ${offsetMm}mm`);
+  console.log(`  Loop thickness: ${minThicknessMm}mm`);
+  
+  // Calculate dimensions in Paper.js units (px)
+  const innerRadiusPx = (innerDiameterMm / 2) * PX_PER_MM;
+  const outerRadiusPx = ((innerDiameterMm + 2 * minThicknessMm) / 2) * PX_PER_MM;
+  const offsetPx = offsetMm * PX_PER_MM;
+  
+  console.log(`  Inner radius: ${innerRadiusPx.toFixed(2)}px`);
+  console.log(`  Outer radius: ${outerRadiusPx.toFixed(2)}px`);
+  console.log(`  Offset: ${offsetPx.toFixed(2)}px`);
+  
+  // Get bounds of all text
+  const textBounds = paperGroup.bounds;
+  console.log(`  Text bounds: x=${textBounds.x.toFixed(2)}, y=${textBounds.y.toFixed(2)}, w=${textBounds.width.toFixed(2)}, h=${textBounds.height.toFixed(2)}`);
+  
+  // Calculate loop positions
+  // DESIGN GOAL: Position loops ABOVE the text like jewelry attachment points
+  // They should sit at the top edges and just barely touch for welding
+  //
+  // For cursive fonts like Pacifico:
+  //   - LEFT loop: at the start of the first letter (top-left)
+  //   - RIGHT loop: at the end of the last letter (top-right)
+  //
+  // Strategy:
+  // 1. Position loops ABOVE the text (higher than text top)
+  // 2. Use bounding box left/right for horizontal positioning
+  // 3. Ensure minimal overlap (just enough for welding)
+  
+  const overlapMm = 0.5; // Minimal overlap - just enough to weld
+  const overlapPx = overlapMm * PX_PER_MM;
+  
+  // Position loops ABOVE the text
+  // The loop center should be positioned so the loop BOTTOM just barely overlaps the text TOP
+  // In Paper.js coordinates: more negative Y = higher position
+  //
+  // Loop bottom position should be slightly below (less negative than) text top
+  // Desired: loopBottom = textBounds.top + overlapPx
+  // Since: loopBottom = centerY + outerRadiusPx
+  // Then: centerY = textBounds.top + overlapPx - outerRadiusPx
+  const loopCenterY = textBounds.top + overlapPx - outerRadiusPx;
+  
+  // Horizontal positions: use the natural start/end of the cursive text
+  const leftX = textBounds.left;
+  const rightX = textBounds.right;
+  
+  const loopTop = loopCenterY - outerRadiusPx;
+  const loopBottom = loopCenterY + outerRadiusPx;
+  
+  // Verify positioning
+  const loopExtendsAboveText = loopTop < textBounds.top;
+  const loopOverlapsText = loopBottom > textBounds.top;
+  const actualOverlapPx = loopOverlapsText ? (loopBottom - textBounds.top) : 0;
+  
+  console.log(`  Loop positioning strategy: ABOVE text with minimal overlap`);
+  console.log(`  Target overlap: ${overlapMm}mm (${overlapPx.toFixed(2)}px)`);
+  console.log(`  Text top: ${textBounds.top.toFixed(2)}`);
+  console.log(`  Loop center Y: ${loopCenterY.toFixed(2)}`);
+  console.log(`  Loop vertical range: ${loopTop.toFixed(2)} to ${loopBottom.toFixed(2)}`);
+  console.log(`  ${loopExtendsAboveText ? '✓' : '✗'} Loop extends above text`);
+  console.log(`  ${loopOverlapsText ? '✓' : '✗'} Loop overlaps text by ${actualOverlapPx.toFixed(2)}px`);
+  console.log(`  Left loop at: (${leftX.toFixed(2)}, ${loopCenterY.toFixed(2)})`);
+  console.log(`  Right loop at: (${rightX.toFixed(2)}, ${loopCenterY.toFixed(2)})`);
+  
+  const loops = [];
+  
+  // Create left loop (donut shape)
+  const leftOuter = new paper.Path.Circle({
+    center: [leftX, loopCenterY],
+    radius: outerRadiusPx
+  });
+  
+  const leftInner = new paper.Path.Circle({
+    center: [leftX, loopCenterY],
+    radius: innerRadiusPx
+  });
+  
+  const leftLoop = leftOuter.subtract(leftInner);
+  leftOuter.remove();
+  leftInner.remove();
+  
+  loops.push(leftLoop);
+  console.log(`  ✓ Created LEFT loop (donut)`);
+  
+  // Create right loop (donut shape)
+  const rightOuter = new paper.Path.Circle({
+    center: [rightX, loopCenterY],
+    radius: outerRadiusPx
+  });
+  
+  const rightInner = new paper.Path.Circle({
+    center: [rightX, loopCenterY],
+    radius: innerRadiusPx
+  });
+  
+  const rightLoop = rightOuter.subtract(rightInner);
+  rightOuter.remove();
+  rightInner.remove();
+  
+  loops.push(rightLoop);
+  console.log(`  ✓ Created RIGHT loop (donut)`);
+  
+  if (debugMode) {
+    console.log(`  📊 Left loop:  center=(${leftX.toFixed(2)}, ${loopCenterY.toFixed(2)}), bounds: top=${leftLoop.bounds.top.toFixed(2)}, bottom=${leftLoop.bounds.bottom.toFixed(2)}`);
+    console.log(`  📊 Right loop: center=(${rightX.toFixed(2)}, ${loopCenterY.toFixed(2)}), bounds: top=${rightLoop.bounds.top.toFixed(2)}, bottom=${rightLoop.bounds.bottom.toFixed(2)}`);
+  }
+  
+  console.log(`✅ Generated ${loops.length} loops positioned ABOVE text`);
+  
+  return loops;
+}
+
+function connectIDots(paperItem, options = {}) {
+  const {
+    enabled = true,
+    overlapMm = 0.4,
+    maxShiftMm = 2.0,
+    searchRadiusMm = 6.0
+  } = options;
+  
+  if (!enabled) {
+    return;
+  }
+  
+  const debug = window.DEBUG_I_DOTS;
+  
+  if (debug) {
+    console.log('🔵 Starting i-dot connection process...');
+    console.log('Options:', { overlapMm, maxShiftMm, searchRadiusMm });
+  }
+  
+  // Convert mm to Paper.js units
+  const overlapPx = mmToPaperUnits(overlapMm);
+  const maxShiftPx = mmToPaperUnits(maxShiftMm);
+  const searchRadiusPx = mmToPaperUnits(searchRadiusMm);
+  
+  // Extract all paths
+  const allPaths = extractAllPaths(paperItem);
+  
+  if (debug) {
+    console.log(`Found ${allPaths.length} total paths`);
+  }
+  
+  if (allPaths.length === 0) {
+    return;
+  }
+  
+  // Calculate overall bounds and median area for heuristics
+  const areas = allPaths.map(p => Math.abs(p.area)).filter(a => a > 0);
+  areas.sort((a, b) => a - b);
+  const medianArea = areas[Math.floor(areas.length / 2)] || 100;
+  
+  const overallBounds = paperItem.bounds;
+  const textHeight = overallBounds.height;
+  
+  if (debug) {
+    console.log('Overall bounds:', overallBounds);
+    console.log('Median path area:', medianArea.toFixed(2));
+  }
+  
+  // A) Identify dot candidates
+  const dotCandidates = [];
+  
+  if (debug) {
+    console.log('\n📍 Analyzing paths for dot candidates:');
+  }
+  
+  for (let i = 0; i < allPaths.length; i++) {
+    const path = allPaths[i];
+    const bounds = path.bounds;
+    const area = Math.abs(path.area);
+    const width = bounds.width;
+    const height = bounds.height;
+    const aspectRatio = width > 0 ? height / width : 0;
+    
+    // Dot heuristics (tuned for Pacifico):
+    // 1. Small area: use 25% of median with a minimum floor of 200px²
+    //    This ensures dots (typically 145px²) always pass, even when median is low
+    const areaThreshold = Math.max(medianArea * 0.25, 200); // Use floor, not ceiling
+    const isSmall = area < areaThreshold;
+    
+    // 2. Roughly round: aspect ratio between 0.5 and 2.0 (more lenient)
+    const isRoundish = aspectRatio >= 0.5 && aspectRatio <= 2.0;
+    
+    // 3. Located in upper region (top 70% of text)
+    const yCenter = bounds.center.y;
+    const isInUpperRegion = yCenter < (overallBounds.top + textHeight * 0.7);
+    
+    // Debug all paths
+    if (debug && i < 5) {
+      console.log(`Path ${i + 1}:`, {
+        area: area.toFixed(2),
+        areaThreshold: areaThreshold.toFixed(2),
+        isSmall,
+        aspectRatio: aspectRatio.toFixed(2),
+        isRoundish,
+        yCenter: yCenter.toFixed(2),
+        upperLimit: (overallBounds.top + textHeight * 0.7).toFixed(2),
+        isInUpperRegion
+      });
+    }
+    
+    if (isSmall && isRoundish && isInUpperRegion) {
+      dotCandidates.push({
+        path: path,
+        bounds: bounds,
+        area: area,
+        center: bounds.center
+      });
+      
+      if (debug) {
+        console.log(`✓ DOT CANDIDATE #${dotCandidates.length}:`, {
+          area: area.toFixed(2),
+          aspectRatio: aspectRatio.toFixed(2),
+          width: width.toFixed(2),
+          height: height.toFixed(2),
+          center: { x: bounds.center.x.toFixed(2), y: bounds.center.y.toFixed(2) }
+        });
+      }
+    }
+  }
+  
+  if (debug) {
+    console.log(`Found ${dotCandidates.length} dot candidates`);
+  }
+  
+  // B & C) For each dot, find matching stem and apply shift
+  let connectedCount = 0;
+  
+  for (let dotIdx = 0; dotIdx < dotCandidates.length; dotIdx++) {
+    const dot = dotCandidates[dotIdx];
+    let bestStem = null;
+    let bestScore = Infinity;
+    
+    if (debug) {
+      console.log(`\n--- Processing dot ${dotIdx + 1}/${dotCandidates.length} ---`);
+      console.log('Dot bounds:', {
+        left: dot.bounds.left.toFixed(2),
+        right: dot.bounds.right.toFixed(2),
+        top: dot.bounds.top.toFixed(2),
+        bottom: dot.bounds.bottom.toFixed(2),
+        centerX: dot.center.x.toFixed(2),
+        centerY: dot.center.y.toFixed(2)
+      });
+    }
+    
+    // Search for stem candidates
+    let stemsConsidered = 0;
+    
+    for (const path of allPaths) {
+      // Skip if it's the dot itself
+      if (path === dot.path) continue;
+      
+      const stemBounds = path.bounds;
+      const stemArea = Math.abs(path.area);
+      
+      // Stem must be significantly larger than dot
+      if (stemArea < dot.area * 3) continue; // Reduced threshold from 5 to 3
+      
+      // Stem should be below the dot
+      // In SVG/Paper.js: positive Y is DOWN, so stem.top > dot.bottom means stem is below
+      const stemTop = stemBounds.top;
+      const stemBottom = stemBounds.bottom;
+      const stemCenterY = stemBounds.center.y;
+      const dotBottom = dot.bounds.bottom;
+      const dotTop = dot.bounds.top;
+      const dotCenterY = dot.center.y;
+      
+      // Vertical relationship: we want stem BELOW dot
+      // So stemCenterY should be > dotCenterY (stem is lower down)
+      const verticalSeparation = stemCenterY - dotCenterY;
+      
+      // Only consider stems that are actually below the dot
+      if (verticalSeparation < 0) continue; // stem is above dot, skip
+      
+      // Calculate the actual gap between dot bottom and stem top
+      const gap = stemTop - dotBottom; // positive = gap exists, negative = already overlapping
+      
+      // Only consider if stem is within search radius vertically
+      if (Math.abs(gap) > searchRadiusPx * 2) continue; // Allow larger search
+      
+      // Horizontal alignment: stem should be roughly under the dot
+      const stemCenterX = stemBounds.center.x;
+      const dotCenterX = dot.center.x;
+      const horizontalDistance = Math.abs(stemCenterX - dotCenterX);
+      
+      if (horizontalDistance > searchRadiusPx) continue;
+      
+      stemsConsidered++;
+      
+      // Score: prefer stems directly below with minimal horizontal offset
+      const score = verticalSeparation * 0.5 + horizontalDistance * 1.0 + Math.abs(gap) * 0.3;
+      
+      if (debug && stemsConsidered <= 3) {
+        console.log(`Stem candidate #${stemsConsidered}:`, {
+          centerY: stemCenterY.toFixed(2),
+          verticalSeparation: verticalSeparation.toFixed(2),
+          gap: gap.toFixed(2),
+          horizontalDistance: horizontalDistance.toFixed(2),
+          score: score.toFixed(2),
+          area: stemArea.toFixed(2)
+        });
+      }
+      
+      if (score < bestScore) {
+        bestScore = score;
+        bestStem = {
+          path: path,
+          bounds: stemBounds,
+          area: stemArea,
+          gap: gap,
+          verticalSeparation: verticalSeparation,
+          horizontalDistance: horizontalDistance
+        };
+      }
+    }
+    
+    if (debug) {
+      console.log(`Considered ${stemsConsidered} stem candidates`);
+    }
+    
+    // If we found a matching stem, apply the shift
+    if (bestStem) {
+      const gap = bestStem.gap;
+      
+      if (debug) {
+        console.log('🎯 MATCHED dot to stem:', {
+          dotCenter: { x: dot.center.x.toFixed(2), y: dot.center.y.toFixed(2) },
+          stemCenter: { x: bestStem.bounds.center.x.toFixed(2), y: bestStem.bounds.center.y.toFixed(2) },
+          gap: gap.toFixed(2),
+          verticalSeparation: bestStem.verticalSeparation.toFixed(2),
+          horizontalDistance: bestStem.horizontalDistance.toFixed(2),
+          score: bestScore.toFixed(2)
+        });
+      }
+      
+      // Calculate required shift
+      let shiftY = 0;
+      
+      if (gap > 0.1) { // Small epsilon to avoid floating point issues
+        // Dot is above stem with a gap - move down to create overlap
+        shiftY = gap + overlapPx;
+        
+        if (debug) {
+          console.log(`📏 Gap exists: ${gap.toFixed(2)}px`);
+          console.log(`📐 Moving dot down by ${shiftY.toFixed(2)}px (gap ${gap.toFixed(2)} + overlap ${overlapPx.toFixed(2)})`);
+        }
+      } else if (gap < -0.1) {
+        // Already overlapping
+        if (debug) {
+          console.log(`✓ Already overlapping by ${Math.abs(gap).toFixed(2)}px, no shift needed`);
+        }
+        connectedCount++;
+        continue;
+      } else {
+        // Touching or very close, just add overlap
+        shiftY = overlapPx;
+        if (debug) {
+          console.log(`📐 Adding overlap: ${shiftY.toFixed(2)}px`);
+        }
+      }
+      
+      // Clamp to maxShift for safety
+      if (shiftY > maxShiftPx) {
+        console.warn(`⚠️ Shift ${shiftY.toFixed(2)}px exceeds max ${maxShiftPx.toFixed(2)}px, clamping`);
+        shiftY = maxShiftPx;
+      }
+      
+      if (debug) {
+        console.log(`🔽 Applying translation: (0, ${shiftY.toFixed(2)})`);
+        console.log(`Before: dot bottom = ${dot.bounds.bottom.toFixed(2)}, stem top = ${bestStem.bounds.top.toFixed(2)}`);
+      }
+      
+      // Apply translation (positive Y is downward in SVG/Paper.js)
+      dot.path.translate(new paper.Point(0, shiftY));
+      
+      if (debug) {
+        const newBounds = dot.path.bounds;
+        console.log(`After: dot bottom = ${newBounds.bottom.toFixed(2)}, stem top = ${bestStem.bounds.top.toFixed(2)}`);
+        console.log(`✓ Dot shifted down by ${shiftY.toFixed(2)}px`);
+      }
+      
+      // Verify overlap
+      const nowIntersects = dot.path.intersects(bestStem.path);
+      
+      if (debug) {
+        console.log(`🔍 Intersection check: ${nowIntersects ? 'YES ✓' : 'NO ✗'}`);
+      }
+      
+      if (!nowIntersects) {
+        console.warn('⚠️ Dot and stem still not intersecting after shift!');
+      }
+      
+      connectedCount++;
+    } else {
+      console.warn('⚠️ Could not find matching stem for dot at position', {
+        x: dot.center.x.toFixed(2),
+        y: dot.center.y.toFixed(2)
+      });
+    }
+  }
+  
+  if (debug) {
+    console.log(`✅ Connected ${connectedCount}/${dotCandidates.length} dots to stems`);
+  }
+}
+
+/**
+ * Estimate minimum distance between two paths by sampling.
+ * Samples points along the rightmost 35% of left path and leftmost 35% of right path.
+ * 
+ * @param {paper.Path} leftPath - Left glyph path
+ * @param {paper.Path} rightPath - Right glyph path
+ * @param {number} sampleStepUnits - Sampling step size in Paper units
+ * @returns {Object} - { minDistance: number, leftPoint: paper.Point, rightPoint: paper.Point, direction: paper.Point }
+ */
+function estimateMinDistanceBetweenPaths(leftPath, rightPath, sampleStepUnits) {
+  let minDistance = Infinity;
+  let bestLeftPoint = null;
+  let bestRightPoint = null;
+  
+  // Get bounds of both paths
+  const leftBounds = leftPath.bounds;
+  const rightBounds = rightPath.bounds;
+  
+  // Define the rightmost 35% of left path
+  const leftSampleThreshold = leftBounds.right - (leftBounds.width * 0.35);
+  
+  // Define the leftmost 35% of right path
+  const rightSampleThreshold = rightBounds.left + (rightBounds.width * 0.35);
+  
+  // Flatten paths for stable sampling
+  const leftFlattened = leftPath.clone();
+  const rightFlattened = rightPath.clone();
+  leftFlattened.flatten(sampleStepUnits * 0.5);
+  rightFlattened.flatten(sampleStepUnits * 0.5);
+  
+  // Sample points from the rightmost region of left path
+  const leftSamplePoints = [];
+  const leftLength = leftFlattened.length;
+  for (let offset = 0; offset < leftLength; offset += sampleStepUnits) {
+    const point = leftFlattened.getPointAt(offset);
+    if (point && point.x >= leftSampleThreshold) {
+      leftSamplePoints.push(point);
+    }
+  }
+  
+  // Sample points from the leftmost region of right path
+  const rightSamplePoints = [];
+  const rightLength = rightFlattened.length;
+  for (let offset = 0; offset < rightLength; offset += sampleStepUnits) {
+    const point = rightFlattened.getPointAt(offset);
+    if (point && point.x <= rightSampleThreshold) {
+      rightSamplePoints.push(point);
+    }
+  }
+  
+  // Clean up flattened clones
+  leftFlattened.remove();
+  rightFlattened.remove();
+  
+  // Find minimum distance by checking each left sample point against right path
+  for (const leftPoint of leftSamplePoints) {
+    const nearestOnRight = rightPath.getNearestPoint(leftPoint);
+    if (nearestOnRight) {
+      const distance = leftPoint.getDistance(nearestOnRight);
+      if (distance < minDistance) {
+        minDistance = distance;
+        bestLeftPoint = leftPoint;
+        bestRightPoint = nearestOnRight;
+      }
+    }
+  }
+  
+  // Also check each right sample point against left path (bidirectional)
+  for (const rightPoint of rightSamplePoints) {
+    const nearestOnLeft = leftPath.getNearestPoint(rightPoint);
+    if (nearestOnLeft) {
+      const distance = rightPoint.getDistance(nearestOnLeft);
+      if (distance < minDistance) {
+        minDistance = distance;
+        bestLeftPoint = nearestOnLeft;
+        bestRightPoint = rightPoint;
+      }
+    }
+  }
+  
+  // Compute direction vector (from left to right)
+  let direction = null;
+  if (bestLeftPoint && bestRightPoint) {
+    direction = bestRightPoint.subtract(bestLeftPoint).normalize();
+  }
+  
+  return {
+    minDistance,
+    leftPoint: bestLeftPoint,
+    rightPoint: bestRightPoint,
+    direction
+  };
+}
+
+/**
+ * AUTO-CONNECT: Geometry-based spacing enforcement
+ * 
+ * Automatically tightens spacing between adjacent glyphs to ensure minimum overlap.
+ * This prevents disconnected letters in the final design.
+ * 
+ * @param {Array} glyphItems - Array of {char, index, item: Paper.Path/CompoundPath}
+ * @param {Object} options - { minOverlapMm, maxTightenMm, debugLog, debugMarkers }
+ * @returns {Array} - Adjusted glyphItems with updated positions
+ */
+function applyAutoConnect(glyphItems, options) {
+  const {
+    minOverlapMm = 0.4,
+    maxTightenMm = 3.0,
+    debugLog = false,
+    debugMarkers = false
+  } = options;
+  
+  if (glyphItems.length < 2) {
+    return glyphItems; // Need at least 2 glyphs to check adjacency
+  }
+  
+  const minOverlapUnits = mmToPaperPixels(minOverlapMm);
+  const maxTightenUnits = mmToPaperPixels(maxTightenMm);
+  const stepUnits = mmToPaperPixels(0.1); // 0.1mm increments
+  
+  if (debugLog) {
+    console.log('\n🔗 === AUTO-CONNECT: Checking adjacent letter overlaps ===');
+    console.log(`Min overlap required: ${minOverlapMm}mm (${minOverlapUnits.toFixed(2)} units)`);
+    console.log(`Max tighten per pair: ${maxTightenMm}mm (${maxTightenUnits.toFixed(2)} units)`);
+  }
+  
+  const adjustments = [];
+  
+  // Process each adjacent pair (left to right)
+  for (let i = 0; i < glyphItems.length - 1; i++) {
+    const left = glyphItems[i];
+    const right = glyphItems[i + 1];
+    
+    // Skip if either glyph is missing
+    if (!left.item || !right.item) {
+      continue;
+    }
+    
+    // Quick bounds check: if bounds don't overlap at all, definitely need tightening
+    const boundsOverlap = left.item.bounds.right >= right.item.bounds.left;
+    
+    if (!boundsOverlap) {
+      if (debugLog) {
+        console.log(`  Pair "${left.char}${right.char}": bounds don't overlap → tightening needed`);
+      }
+    }
+    
+    // Check actual geometric overlap using boolean intersection
+    let currentInter = null;
+    let overlapOk = false;
+    
+    try {
+      currentInter = left.item.intersect(right.item);
+      
+      if (currentInter && currentInter.area > 0.01) {
+        // Intersection exists, check if it meets minimum size
+        const interW = currentInter.bounds.width;
+        const interH = currentInter.bounds.height;
+        const maxDim = Math.max(interW, interH);
+        
+        overlapOk = maxDim >= minOverlapUnits;
+        
+        if (debugLog) {
+          console.log(`  Pair "${left.char}${right.char}": overlap ${maxDim.toFixed(2)} units ${overlapOk ? '✓ PASS' : '✗ FAIL (too small)'}`);
+        }
+      } else {
+        // No intersection
+        if (debugLog) {
+          console.log(`  Pair "${left.char}${right.char}": no intersection → tightening needed`);
+        }
+        overlapOk = false;
+      }
+      
+      // Clean up temporary intersection
+      if (currentInter) {
+        currentInter.remove();
+      }
+    } catch (error) {
+      console.error(`Error checking overlap for "${left.char}${right.char}":`, error);
+      overlapOk = false; // Assume fail on error
+    }
+    
+    // If overlap is insufficient, auto-tighten
+    if (!overlapOk) {
+      let shiftAccum = 0;
+      let finalShift = 0;
+      let found = false;
+      
+      // Try tightening in small steps
+      while (shiftAccum < maxTightenUnits) {
+        // Shift right glyph and all subsequent glyphs to the left
+        const shiftDelta = Math.min(stepUnits, maxTightenUnits - shiftAccum);
+        
+        for (let j = i + 1; j < glyphItems.length; j++) {
+          if (glyphItems[j].item) {
+            glyphItems[j].item.position.x -= shiftDelta;
+          }
+        }
+        
+        shiftAccum += shiftDelta;
+        finalShift += shiftDelta;
+        
+        // Re-check overlap
+        try {
+          const testInter = left.item.intersect(right.item);
+          
+          if (testInter && testInter.area > 0.01) {
+            const interW = testInter.bounds.width;
+            const interH = testInter.bounds.height;
+            const maxDim = Math.max(interW, interH);
+            
+            if (maxDim >= minOverlapUnits) {
+              found = true;
+              testInter.remove();
+              break;
+            }
+          }
+          
+          if (testInter) {
+            testInter.remove();
+          }
+        } catch (error) {
+          // Continue trying
+        }
+      }
+      
+      if (found) {
+        const shiftMm = finalShift / PX_PER_MM;
+        adjustments.push({
+          pair: `${left.char}${right.char}`,
+          shiftMm: shiftMm.toFixed(3),
+          status: 'SUCCESS'
+        });
+        
+        if (debugLog) {
+          console.log(`    ✓ Auto-tightened by ${shiftMm.toFixed(3)}mm`);
+        }
+      } else {
+        // MAX_REACHED: Try emergency nudge using nearest-distance estimation
+        const shiftMm = finalShift / PX_PER_MM;
+        
+        if (debugLog) {
+          console.warn(`    ⚠ Max tighten reached (${shiftMm.toFixed(3)}mm) - trying emergency nudge...`);
+        }
+        
+        // Estimate minimum distance between paths
+        const sampleStepUnits = mmToPaperPixels(0.5); // 0.5mm sampling step
+        const distanceInfo = estimateMinDistanceBetweenPaths(left.item, right.item, sampleStepUnits);
+        
+        if (distanceInfo.minDistance < Infinity && distanceInfo.minDistance > 0) {
+          const distanceMm = distanceInfo.minDistance / PX_PER_MM;
+          
+          if (debugLog) {
+            console.log(`      Measured min distance: ${distanceMm.toFixed(3)}mm (${distanceInfo.minDistance.toFixed(2)} units)`);
+          }
+          
+          // Compute required extra shift for overlap
+          // We want to move closer by: distance + desired overlap + small epsilon
+          const epsilonUnits = mmToPaperPixels(0.05); // 0.05mm safety margin
+          const requiredExtraShift = distanceInfo.minDistance + minOverlapUnits + epsilonUnits;
+          
+          // Cap emergency extra to +1.0mm beyond max tighten to avoid crazy collisions
+          const emergencyCapUnits = mmToPaperPixels(1.0);
+          const allowedExtraShift = Math.min(requiredExtraShift, emergencyCapUnits);
+          
+          if (allowedExtraShift > 0) {
+            const extraShiftMm = allowedExtraShift / PX_PER_MM;
+            
+            if (debugLog) {
+              console.log(`      Applying emergency nudge: ${extraShiftMm.toFixed(3)}mm`);
+            }
+            
+            // Apply emergency shift to right glyph and all subsequent glyphs
+            for (let j = i + 1; j < glyphItems.length; j++) {
+              if (glyphItems[j].item) {
+                glyphItems[j].item.position.x -= allowedExtraShift;
+              }
+            }
+            
+            finalShift += allowedExtraShift;
+            
+            // Verify the emergency nudge worked
+            try {
+              const finalInter = left.item.intersect(right.item);
+              
+              if (finalInter && finalInter.area > 0.01) {
+                const interW = finalInter.bounds.width;
+                const interH = finalInter.bounds.height;
+                const maxDim = Math.max(interW, interH);
+                
+                if (maxDim >= minOverlapUnits) {
+                  const totalShiftMm = finalShift / PX_PER_MM;
+                  adjustments.push({
+                    pair: `${left.char}${right.char}`,
+                    shiftMm: totalShiftMm.toFixed(3),
+                    status: 'EMERGENCY_NUDGE_SUCCESS'
+                  });
+                  
+                  if (debugLog) {
+                    console.log(`      ✓ Emergency nudge SUCCESS! Total shift: ${totalShiftMm.toFixed(3)}mm`);
+                  }
+                  
+                  finalInter.remove();
+                } else {
+                  const totalShiftMm = finalShift / PX_PER_MM;
+                  adjustments.push({
+                    pair: `${left.char}${right.char}`,
+                    shiftMm: totalShiftMm.toFixed(3),
+                    status: 'PARTIAL_SUCCESS'
+                  });
+                  
+                  if (debugLog) {
+                    console.warn(`      ⚠ Partial success - overlap improved but still below minimum. Total shift: ${totalShiftMm.toFixed(3)}mm`);
+                  }
+                  
+                  finalInter.remove();
+                }
+              } else {
+                const totalShiftMm = finalShift / PX_PER_MM;
+                adjustments.push({
+                  pair: `${left.char}${right.char}`,
+                  shiftMm: totalShiftMm.toFixed(3),
+                  status: 'EMERGENCY_NUDGE_INSUFFICIENT'
+                });
+                
+                if (debugLog) {
+                  console.warn(`      ⚠ Emergency nudge applied but no intersection achieved. Total shift: ${totalShiftMm.toFixed(3)}mm`);
+                }
+                
+                if (finalInter) finalInter.remove();
+              }
+            } catch (error) {
+              const totalShiftMm = finalShift / PX_PER_MM;
+              adjustments.push({
+                pair: `${left.char}${right.char}`,
+                shiftMm: totalShiftMm.toFixed(3),
+                status: 'EMERGENCY_NUDGE_ERROR'
+              });
+              
+              if (debugLog) {
+                console.error(`      ✗ Error verifying emergency nudge:`, error);
+              }
+            }
+          } else {
+            const totalShiftMm = finalShift / PX_PER_MM;
+            adjustments.push({
+              pair: `${left.char}${right.char}`,
+              shiftMm: totalShiftMm.toFixed(3),
+              status: 'MAX_REACHED'
+            });
+            
+            if (debugLog) {
+              console.warn(`      ⚠ Emergency cap exceeded, no further adjustment. Total shift: ${totalShiftMm.toFixed(3)}mm`);
+            }
+          }
+        } else {
+          const totalShiftMm = finalShift / PX_PER_MM;
+          adjustments.push({
+            pair: `${left.char}${right.char}`,
+            shiftMm: totalShiftMm.toFixed(3),
+            status: 'MAX_REACHED'
+          });
+          
+          if (debugLog) {
+            console.warn(`      ⚠ Could not measure distance between paths. Total shift: ${totalShiftMm.toFixed(3)}mm`);
+          }
+        }
+      }
+    }
+  }
+  
+  if (debugLog && adjustments.length > 0) {
+    console.log(`\n📊 Auto-connect summary:`);
+    console.log(`  Total pairs adjusted: ${adjustments.length}`);
+    adjustments.forEach(adj => {
+      console.log(`    ${adj.pair}: ${adj.shiftMm}mm (${adj.status})`);
+    });
+  }
+  
+  if (debugLog) {
+    console.log('🔗 === AUTO-CONNECT COMPLETE ===\n');
+  }
+  
+  return glyphItems;
+}
+
+// Apply Paper.js boolean union operation to merge overlapping paths
+// This function takes the text and generates separate paths for each letter,
+// then unites them using Paper.js
+function applyPaperJsUnion(text, fontSize, letterSpacing, pairSpacingMap = {}) {
+  if (!text || !pacificoFont) {
+    return '';
+  }
+  
+  try {
+    // Clear the Paper.js project
+    paper.project.clear();
+    
+    // Get individual letter paths and glyph bounds
+    const { pathData: letterPaths, glyphBounds } = generatePathWithKerning(text, fontSize, letterSpacing, true, pairSpacingMap);
+    
+    if (letterPaths.length === 0) {
+      console.warn('No letter paths generated');
+      const fallback = generatePathWithKerning(text, fontSize, letterSpacing, false, pairSpacingMap);
+      return fallback.pathData;
+    }
+    
+    console.log(`Generated ${letterPaths.length} individual letter paths`);
+    
+    // Note: We no longer skip single letters - they still need i-dot connection
+    // (removed single-letter bypass that was preventing i/j dots from connecting)
+    
+    // Import each letter and extract the actual Path/CompoundPath object
+    // Also build glyphItems array with character information for auto-connect
+    const pathItems = [];
+    const glyphItems = [];
+    
+    for (let i = 0; i < letterPaths.length; i++) {
+      const svgString = `<svg><path d="${letterPaths[i]}"/></svg>`;
+      const imported = paper.project.importSVG(svgString);
+      
+      if (!imported) {
+        console.warn(`Failed to import letter ${i + 1}`);
+        continue;
+      }
+      
+      // Extract the actual path from the imported item
+      let actualPath = null;
+      
+      if (imported instanceof paper.Path || imported instanceof paper.CompoundPath) {
+        // Already a path
+        actualPath = imported;
+      } else if (imported instanceof paper.Group && imported.children.length > 0) {
+        // It's a group, find the first path child
+        for (let child of imported.children) {
+          if (child instanceof paper.Path || child instanceof paper.CompoundPath) {
+            actualPath = child.clone();
+            break;
+          }
+        }
+        imported.remove(); // Remove the group, we cloned what we need
+      }
+      
+      if (actualPath) {
+        pathItems.push(actualPath);
+        
+        // Build glyphItems for auto-connect (with character info)
+        glyphItems.push({
+          char: text[i] || '?',
+          index: i,
+          item: actualPath
+        });
+        
+        console.log(`✓ Imported letter ${i + 1} (${text[i]}) as ${actualPath.constructor.name}`);
+      } else {
+        console.warn(`Could not extract path from letter ${i + 1}`);
+      }
+    }
+    
+    if (pathItems.length === 0) {
+      throw new Error('Failed to import any letter paths');
+    }
+    
+    console.log(`Successfully extracted ${pathItems.length} path objects`);
+    
+    // Apply auto-connect if enabled (before i-dot connection and union)
+    if (currentSettings.autoConnect) {
+      console.log('🔗 Auto-connect enabled: checking adjacent letter overlaps...');
+      applyAutoConnect(glyphItems, {
+        minOverlapMm: currentSettings.autoConnectMinOverlap,
+        maxTightenMm: currentSettings.autoConnectMaxTighten,
+        debugLog: currentSettings.autoConnectDebugLog,
+        debugMarkers: currentSettings.autoConnectDebugMarkers
+      });
+    }
+    
+    // Before union: Connect i-dots to stems if enabled
+    if (currentSettings.connectIDots) {
+      console.log('🔵 Attempting i-dot connection...');
+      
+      // Create a temporary group with clones to avoid modifying originals prematurely
+      const tempGroup = new paper.Group();
+      
+      // Add all paths to the group for processing
+      for (const item of pathItems) {
+        tempGroup.addChild(item);
+      }
+      
+      console.log(`Created group with ${tempGroup.children.length} items for i-dot processing`);
+      
+      // Run i-dot connection on the group
+      connectIDots(tempGroup, {
+        enabled: true,
+        overlapMm: currentSettings.iDotOverlap,
+        maxShiftMm: currentSettings.iDotMaxShift,
+        searchRadiusMm: currentSettings.iDotSearchRadius
+      });
+      
+      // Extract all items back from the group
+      pathItems.length = 0;
+      const children = tempGroup.removeChildren();
+      
+      for (const child of children) {
+        pathItems.push(child);
+      }
+      
+      tempGroup.remove();
+      
+      console.log(`After i-dot connection: ${pathItems.length} paths ready for union`);
+    }
+    
+    // Unite all text paths first (before adding loops)
+    console.log(`Starting union of ${pathItems.length} text paths...`);
+    
+    let result = pathItems[0];
+    
+    for (let i = 1; i < pathItems.length; i++) {
+      try {
+        const isLoop = i >= pathItems.length - (currentSettings.addLoops ? 2 : 0);
+        console.log(`Uniting ${isLoop ? 'LOOP' : 'letter'} ${i + 1} (${pathItems[i].constructor.name}) with result (${result.constructor.name})...`);
+        if (isLoop && currentSettings.debugMode) {
+          console.log(`  Loop bounds: top=${pathItems[i].bounds.top.toFixed(2)}, bottom=${pathItems[i].bounds.bottom.toFixed(2)}, left=${pathItems[i].bounds.left.toFixed(2)}, right=${pathItems[i].bounds.right.toFixed(2)}`);
+          console.log(`  Result bounds before: top=${result.bounds.top.toFixed(2)}, bottom=${result.bounds.bottom.toFixed(2)}, left=${result.bounds.left.toFixed(2)}, right=${result.bounds.right.toFixed(2)}`);
+          
+          // Check if loop intersects with result
+          const intersects = result.intersects(pathItems[i]);
+          const intersection = result.intersect(pathItems[i], { insert: false });
+          const hasIntersectionArea = intersection && Math.abs(intersection.area) > 0.01;
+          
+          console.log(`  Intersection test: ${intersects ? 'YES' : 'NO'}`);
+          console.log(`  Intersection area: ${intersection ? Math.abs(intersection.area).toFixed(2) : '0.00'}px² ${hasIntersectionArea ? '✓' : '✗ (no actual overlap!)'}`);
+          
+          if (intersection) {
+            intersection.remove(); // Clean up test object
+          }
+        }
+        
+        const newResult = result.unite(pathItems[i]);
+        
+        if (!newResult) {
+          console.error(`Unite operation for ${isLoop ? 'LOOP' : 'letter'} ${i + 1} returned null!`);
+          continue;
+        }
+        
+        if (isLoop) {
+          console.log(`  Result bounds after: top=${newResult.bounds.top.toFixed(2)}, bottom=${newResult.bounds.bottom.toFixed(2)}`);
+          const boundsChanged = Math.abs(newResult.bounds.top - result.bounds.top) > 0.01;
+          console.log(`  ${boundsChanged ? '✓ BOUNDS CHANGED - union worked!' : '⚠️ BOUNDS UNCHANGED - union may have failed!'}`);
+        }
+        console.log(`✓ Unite successful, result is ${newResult.constructor.name}`);
+        
+        // Clean up old objects
+        if (result !== pathItems[0]) {
+          result.remove();
+        }
+        pathItems[i].remove();
+        
+        result = newResult;
+        
+      } catch (uniteError) {
+        console.error(`Error uniting letter ${i + 1}:`, uniteError);
+        console.error('Stack:', uniteError.stack);
+        // Continue with current result
+      }
+    }
+    
+    // After uniting all text, attach loops if enabled
+    if (currentSettings.addLoops) {
+      console.log('');
+      console.log('═══════════════════════════════════════════════════════');
+      console.log('  ATTACHING LOOPS TO TEXT USING GEOMETRY SAMPLING');
+      console.log('═══════════════════════════════════════════════════════');
+      console.log('');
+      
+      result = attachLoopsToEnds(result, {
+        innerDiameterMm: currentSettings.loopInnerDiameter,
+        outerDiameterMm: currentSettings.loopOuterDiameter,
+        offsetFromTextMm: currentSettings.loopOffset,
+        loopOverlapMm: currentSettings.loopOverlap || 0.4,
+        glyphBounds: glyphBounds  // Pass glyph bounds for anchor region filtering
+      }, currentSettings.debugMode);
+      
+      console.log('');
+      console.log('═══════════════════════════════════════════════════════');
+      console.log('');
+    }
+    
+    // Clean up debug visualization items before export (don't include in final SVG)
+    const debugItems = paper.project.activeLayer.children.filter(item => 
+      item.name && item.name.startsWith('debug')
+    );
+    for (const item of debugItems) {
+      item.remove();
+    }
+    
+    // Apply strengthen offset if enabled
+    if (currentSettings.strengthenOffset) {
+      console.log('');
+      console.log('═══════════════════════════════════════════════════════');
+      console.log(`  APPLYING STRENGTHEN OFFSET (+${currentSettings.strengthenAmount}mm)`);
+      console.log('═══════════════════════════════════════════════════════');
+      
+      result = applyStrengthenOffset(result, currentSettings.strengthenAmount, currentSettings.debugMode);
+      
+      console.log('═══════════════════════════════════════════════════════');
+      console.log('');
+    }
+    
+    // Export the unified path back to SVG path data
+    console.log(`Exporting result (${result.constructor.name})...`);
+    
+    const exportedSVG = result.exportSVG({ asString: false });
+    console.log('Exported SVG:', exportedSVG);
+    
+    if (exportedSVG) {
+      let unifiedPathData = null;
+      
+      // Try to get the 'd' attribute
+      if (exportedSVG.getAttribute) {
+        unifiedPathData = exportedSVG.getAttribute('d');
+      }
+      
+      // If it's a path element directly
+      if (!unifiedPathData && exportedSVG.tagName === 'path') {
+        unifiedPathData = exportedSVG.getAttribute('d');
+      }
+      
+      // If it's a group, look for path children
+      if (!unifiedPathData && exportedSVG.tagName === 'g') {
+        const pathElements = exportedSVG.getElementsByTagName('path');
+        if (pathElements && pathElements.length > 0) {
+          // Combine all path data
+          const pathDataArray = [];
+          for (let i = 0; i < pathElements.length; i++) {
+            const d = pathElements[i].getAttribute('d');
+            if (d) pathDataArray.push(d);
+          }
+          unifiedPathData = pathDataArray.join(' ');
+        }
+      }
+      
+      if (unifiedPathData) {
+        console.log('✓ Successfully unified all letter paths into single shape');
+        return unifiedPathData;
+      }
+    }
+    
+    console.error('Could not extract path data from unified result');
+    console.warn('Returning combined original path (non-welded)');
+    const fallback1 = generatePathWithKerning(text, fontSize, letterSpacing, false, pairSpacingMap);
+    return fallback1.pathData;
+    
+  } catch (error) {
+    console.error('Paper.js union error:', error);
+    console.error('Error stack:', error.stack);
+    // Return original combined path data on error
+    console.warn('Falling back to original combined path data due to error');
+    const fallback2 = generatePathWithKerning(text, fontSize, letterSpacing, false, pairSpacingMap);
+    return fallback2.pathData;
+  }
+}
+
+// Initialize - disable input until font loads
+nameInput.disabled = true;
+downloadBtn.disabled = true;
+
+// ============================================
+// DEVELOPER MODE: Toggle Expert section with Ctrl + Shift + X
+// ============================================
+const EXPERT_STORAGE_KEY = 'showExpert';
+const expertSection = document.getElementById('expertSection');
+
+// Check localStorage and apply initial visibility
+function initExpertVisibility() {
+  const showExpert = localStorage.getItem(EXPERT_STORAGE_KEY);
+  if (showExpert === '1') {
+    expertSection.classList.remove('dev-only-hidden');
+    console.log('🔓 Expert mode: ENABLED');
+  } else {
+    expertSection.classList.add('dev-only-hidden');
+  }
+}
+
+// Toggle expert section visibility
+function toggleExpertMode() {
+  const isCurrentlyHidden = expertSection.classList.contains('dev-only-hidden');
+  
+  if (isCurrentlyHidden) {
+    // Show expert section
+    expertSection.classList.remove('dev-only-hidden');
+    localStorage.setItem(EXPERT_STORAGE_KEY, '1');
+    console.log('🔓 Expert mode ENABLED');
+  } else {
+    // Hide expert section
+    expertSection.classList.add('dev-only-hidden');
+    localStorage.removeItem(EXPERT_STORAGE_KEY);
+    console.log('🔒 Expert mode DISABLED');
+  }
+}
+
+// Keyboard shortcut listener: Ctrl + Shift + X
+document.addEventListener('keydown', (event) => {
+  // Skip if user is typing in an input or textarea
+  const target = event.target;
+  if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+    return;
+  }
+  
+  // Detect Ctrl + Shift + X
+  if (event.ctrlKey && event.shiftKey && (event.key === 'X' || event.key === 'x')) {
+    event.preventDefault();
+    toggleExpertMode();
+  }
+});
+
+// Initialize expert visibility on page load
+initExpertVisibility();
+
+// Load the font when page loads
+loadFont();
