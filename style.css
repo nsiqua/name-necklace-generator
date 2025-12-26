@@ -187,6 +187,27 @@ h1 {
   cursor: not-allowed;
 }
 
+/* Feedback link (subtle, below download button) */
+.feedback-link {
+  margin-top: 12px;
+  margin-bottom: 30px;
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.65);
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  align-items: center;
+}
+
+.feedback-link a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.feedback-link a:hover {
+  color: rgba(0, 0, 0, 0.85);
+}
+
 /* ============================================ */
 /* ADVANCED & EXPERT SECTIONS (collapsible) */
 /* ============================================ */
