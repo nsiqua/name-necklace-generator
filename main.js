@@ -1,5 +1,10 @@
+import * as makerjsNS from 'makerjs';
+
+// Normalize CommonJS/ESM interop
+const makerjs = makerjsNS.default ?? makerjsNS;
+
 /**
- * Name Necklace SVG Generator
+ * Name Necklace SVG Generator - v2.1 (Auto-connect fix applied)
  * 
  * ARCHITECTURE OVERVIEW:
  * 
@@ -45,6 +50,7 @@ const nameInput = document.getElementById('nameInput');
 const namePath = document.getElementById('namePath');
 const previewSvg = document.getElementById('previewSvg');
 const downloadBtn = document.getElementById('downloadBtn');
+const formatSelect = document.getElementById('formatSelect');
 // resetViewBoxBtn removed - auto-fit is now automatic
 const statusBar = document.getElementById('statusBar');
 const statusText = document.getElementById('statusText');
@@ -111,17 +117,38 @@ const PX_PER_MM = 96 / 25.4;  // ~3.7795
 //   o-=-0.25  : Tighten "o" followed by hyphen for better spacing
 //   -b=-0.21  : Tighten hyphen followed by "b" for better spacing
 const BUILTIN_PAIR_OVERRIDES = {
-  "So": -0.15,
-  "IA": -0.21,
-  "o-": -0.25,
-  "-b": -0.21
+  "So": 0,
+  "IA": 0,
+  "o-": 0,
+  "-b": 0
 };
 
 // ============================================
 // MULTI-FONT SYSTEM
 // ============================================
+
+// Configuration for built-in (preloaded) fonts
+const BUILTIN_FONTS = {
+  'pacifico': { file: 'Pacifico-Regular.ttf', name: 'Pacifico' },
+  'cookie': { file: 'Cookie-Regular.ttf', name: 'Cookie' },
+  'dancing-script': { file: 'DancingScript-Regular.ttf', name: 'Dancing Script' },
+  'norican': { file: 'Norican-Regular.ttf', name: 'Norican' },
+  'rochester': { file: 'Rochester-Regular.ttf', name: 'Rochester' },
+  'satisfy': { file: 'Satisfy-Regular.ttf', name: 'Satisfy' },
+  'sriracha': { file: 'Sriracha-Regular.ttf', name: 'Sriracha' },
+  'style-script': { file: 'StyleScript-Regular.ttf', name: 'Style Script' }
+};
+
+// Font storage object (will be populated as fonts are loaded)
 const fonts = {
-  pacifico: null
+  pacifico: null,
+  cookie: null,
+  'dancing-script': null,
+  norican: null,
+  rochester: null,
+  satisfy: null,
+  sriracha: null,
+  'style-script': null
 };
 
 // Store multiple custom fonts
@@ -132,11 +159,16 @@ let customFontCounter = 0;
 let activeFontKey = 'pacifico';
 
 function getActiveFont() {
-  if (activeFontKey === 'pacifico') {
-    return fonts.pacifico;
+  // Check if it's a builtin font
+  if (BUILTIN_FONTS[activeFontKey]) {
+    return fonts[activeFontKey];
   }
   // Check if it's a custom font
-  return customFontsById.get(activeFontKey) || fonts.pacifico;
+  if (customFontsById.has(activeFontKey)) {
+    return customFontsById.get(activeFontKey);
+  }
+  // Fallback to Pacifico if something went wrong
+  return fonts.pacifico;
 }
 
 // ============================================
@@ -166,9 +198,9 @@ let currentSettings = {
 
   // AUTO-CONNECT: geometry-based spacing enforcement (Expert feature)
   autoConnect: true,            // enable auto-connect adjacent letters (enabled by default)
-  autoConnectMinOverlap: 0.4,   // mm minimum overlap required
-  autoConnectMaxTighten: 6.0,   // mm maximum tightening per pair (safety, increased for edge cases)
-  autoConnectDebugLog: false,   // log auto-adjustments to console
+  autoConnectMinOverlap: 1.0,   // mm minimum overlap required (balanced for natural script connections)
+  autoConnectMaxTighten: 10.0,  // mm maximum tightening per pair (increased for script fonts with larger gaps)
+  autoConnectDebugLog: true,    // log auto-adjustments to console (ENABLED FOR DEBUGGING)
   autoConnectDebugMarkers: false, // draw overlap markers in preview
 
   debugMode: false,        // enable debug logging and visualization
@@ -233,21 +265,42 @@ function initializeUI() {
   console.log('✓ UI initialized with defaults (loops ON, strengthen ON for stainless steel)');
 }
 
-// Load the Pacifico font at startup
+// Helper function to load a built-in font by key
+async function loadBuiltinFont(fontKey) {
+  const fontConfig = BUILTIN_FONTS[fontKey];
+
+  if (!fontConfig) {
+    throw new Error(`Unknown font key: ${fontKey}`);
+  }
+
+  // If already loaded, return immediately
+  if (fonts[fontKey]) {
+    return fonts[fontKey];
+  }
+
+  // Load font from public folder
+  const response = await fetch(`/fonts/${fontConfig.file}`);
+
+  if (!response.ok) {
+    throw new Error(`Font file not found (HTTP ${response.status}). Please ensure ${fontConfig.file} is in the /public/fonts/ folder.`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  fonts[fontKey] = opentype.parse(arrayBuffer);
+
+  console.log(`✓ ${fontConfig.name} font loaded:`, fonts[fontKey].names.fullName.en);
+
+  return fonts[fontKey];
+}
+
+// Load the default font (Pacifico) at startup
 async function loadFont() {
   try {
     statusBar.className = 'status-bar loading';
     statusText.textContent = 'Loading Pacifico font...';
 
-    // Load font from public folder
-    const response = await fetch('/fonts/Pacifico-Regular.ttf');
-
-    if (!response.ok) {
-      throw new Error(`Font file not found (HTTP ${response.status}). Please ensure Pacifico-Regular.ttf is in the /public/fonts/ folder.`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    fonts.pacifico = opentype.parse(arrayBuffer);
+    // Load Pacifico as the default font
+    await loadBuiltinFont('pacifico');
 
     // Font loaded successfully
     statusBar.className = 'status-bar success';
@@ -259,8 +312,6 @@ async function loadFont() {
     // Enable the input
     nameInput.disabled = false;
     nameInput.focus();
-
-    console.log('✓ Pacifico font loaded:', fonts.pacifico.names.fullName.en);
 
   } catch (error) {
     console.error('Font loading error:', error);
@@ -275,6 +326,7 @@ async function loadFont() {
     // Keep input disabled if font fails to load
     nameInput.disabled = true;
     downloadBtn.disabled = true;
+    formatSelect.disabled = true;
   }
 }
 
@@ -294,9 +346,41 @@ fontSelect.addEventListener('change', async (e) => {
     return;
   }
 
-  // Switch to the selected font (pacifico or a custom font ID)
+  // Check if this is a builtin font
+  if (BUILTIN_FONTS[selectedValue]) {
+    try {
+      // Show loading status
+      statusBar.className = 'status-bar loading';
+      statusText.textContent = `Loading ${BUILTIN_FONTS[selectedValue].name} font...`;
+
+      // Load the font (will use cache if already loaded)
+      await loadBuiltinFont(selectedValue);
+
+      // Switch to the loaded font
+      activeFontKey = selectedValue;
+      console.log(`✓ Switched to ${BUILTIN_FONTS[selectedValue].name} font`);
+
+      // Update status
+      statusBar.className = 'status-bar success';
+      statusText.textContent = `${BUILTIN_FONTS[selectedValue].name} font loaded successfully!`;
+
+      // Regenerate preview with new font
+      generatePreview();
+
+    } catch (error) {
+      console.error('Font loading error:', error);
+      statusBar.className = 'status-bar error';
+      statusText.textContent = `Error loading font: ${error.message}`;
+
+      // Revert to previous font
+      e.target.value = activeFontKey;
+    }
+    return;
+  }
+
+  // Otherwise it's a custom font ID - switch to it
   activeFontKey = selectedValue;
-  console.log(`✓ Switched to ${selectedValue} font`);
+  console.log(`✓ Switched to custom font ${selectedValue}`);
   generatePreview();
 });
 
@@ -896,7 +980,7 @@ function applyStrengthenOffset(item, offsetMm, debug) {
 
 // Generate preview with opentype.js paths
 function generatePreview() {
-  const name = nameInput.value;
+  const name = nameInput.value.trim();
 
   if (!name || name.trim().length === 0 || !getActiveFont()) {
     namePath.setAttribute('d', '');
@@ -917,11 +1001,15 @@ function generatePreview() {
     // Update the path element
     namePath.setAttribute('d', finalPathData);
 
+    // Use nonzero for correct cursive joins and overlapping strokes
+    namePath.setAttribute('fill-rule', 'nonzero');
+
     // Auto-fit preview viewBox (center and fit the design with padding)
     autoFitViewBox();
 
     // Enable download button
     downloadBtn.disabled = false;
+    formatSelect.disabled = false;
   } catch (error) {
     console.error('Error generating preview:', error);
     // Show error in status bar
@@ -929,6 +1017,7 @@ function generatePreview() {
     statusText.textContent = `Preview Error: ${error.message}`;
     // Disable download button on error
     downloadBtn.disabled = true;
+    formatSelect.disabled = true;
   }
 }
 
@@ -1032,6 +1121,13 @@ function layoutTextWithPairSpacing(font, text, fontSizePx, defaultSpacingEm, pai
 
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
+
+    // Skip space characters - they have zero geometry but nonzero advance
+    // which corrupts positioning, auto-connect, and loop attachment
+    if (char === " ") {
+      continue;
+    }
+
     const glyph = font.charToGlyph(char);
 
     // Place current glyph at current x position
@@ -1238,7 +1334,7 @@ function generatePathWithKerning(text, fontSize, letterSpacing, separateLetters 
  * Called automatically after every design update.
  */
 function autoFitViewBox() {
-  const name = nameInput.value;
+  const name = nameInput.value.trim();
   if (!name || name.trim().length === 0 || !getActiveFont()) return;
 
   try {
@@ -1269,8 +1365,26 @@ function autoFitViewBox() {
   }
 }
 
-// Download SVG file
+// Download file based on selected format
 downloadBtn.addEventListener('click', () => {
+  const name = nameInput.value.trim();
+  if (!name || !getActiveFont()) return;
+
+  const selectedFormat = formatSelect.value;
+
+  if (selectedFormat === 'png') {
+    downloadPNG();
+  } else if (selectedFormat === 'pdf') {
+    downloadPDF();
+  } else if (selectedFormat === 'dxf') {
+    downloadDXF();
+  } else {
+    downloadSVG();
+  }
+});
+
+// Download SVG function
+function downloadSVG() {
   const name = nameInput.value.trim();
   if (!name || !getActiveFont()) return;
 
@@ -1289,7 +1403,231 @@ downloadBtn.addEventListener('click', () => {
   URL.revokeObjectURL(url);
 
   console.log('✓ SVG downloaded:', link.download);
-});
+}
+
+// Download PNG at 300 DPI with white background
+function downloadPNG() {
+  const name = nameInput.value.trim();
+  if (!name || !getActiveFont()) return;
+
+  const svg = previewSvg;
+  const svgString = new XMLSerializer().serializeToString(svg);
+
+  // Create blob and URL
+  const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+
+  const img = new Image();
+
+  img.onload = () => {
+    try {
+      // Calculate scale for 300 DPI (SVG is at 96 DPI)
+      const scale = 300 / 96; // ~3.125
+
+      // Use the SVG's display dimensions (how it appears in the browser)
+      // The browser already handles viewBox rendering when converting to Image
+      const svgWidth = svg.clientWidth || svg.getBoundingClientRect().width;
+      const svgHeight = svg.clientHeight || svg.getBoundingClientRect().height;
+
+      // Create canvas at 300 DPI using display dimensions
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(svgWidth * scale);
+      canvas.height = Math.round(svgHeight * scale);
+
+      const ctx = canvas.getContext('2d');
+
+      // Fill white background
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Scale for 300 DPI and draw
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0, svgWidth, svgHeight);
+
+      // Convert to PNG blob and download
+      canvas.toBlob((pngBlob) => {
+        const pngUrl = URL.createObjectURL(pngBlob);
+        const link = document.createElement('a');
+        link.href = pngUrl;
+        link.download = `${name.replace(/\s+/g, '_')}_necklace.png`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(pngUrl);
+
+        console.log('✓ PNG downloaded:', link.download, `(${canvas.width}x${canvas.height}px at 300 DPI)`);
+      }, 'image/png');
+
+    } catch (error) {
+      console.error('Error generating PNG:', error);
+      alert('Failed to generate PNG. Please try again.');
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  img.onerror = () => {
+    console.error('Failed to load SVG image');
+    alert('Failed to load SVG for PNG export. Please try again.');
+    URL.revokeObjectURL(url);
+  };
+
+  img.src = url;
+}
+
+// Download PDF at 300 DPI with white background
+function downloadPDF() {
+  const name = nameInput.value.trim();
+  if (!name || !getActiveFont()) return;
+
+  const svg = previewSvg;
+  const svgString = new XMLSerializer().serializeToString(svg);
+
+  // Create blob and URL
+  const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+
+  const img = new Image();
+
+  img.onload = () => {
+    try {
+      // Calculate scale for 300 DPI (SVG is at 96 DPI)
+      const scale = 300 / 96; // ~3.125
+
+      // Use the SVG's display dimensions
+      const svgWidth = svg.clientWidth || svg.getBoundingClientRect().width;
+      const svgHeight = svg.clientHeight || svg.getBoundingClientRect().height;
+
+      // Create canvas at 300 DPI
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(svgWidth * scale);
+      canvas.height = Math.round(svgHeight * scale);
+
+      const ctx = canvas.getContext('2d');
+
+      // Fill white background
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Scale for 300 DPI and draw
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0, svgWidth, svgHeight);
+
+      // Convert canvas to image and create PDF
+      const imgData = canvas.toDataURL('image/png');
+
+      // Calculate PDF dimensions in inches (300 DPI)
+      const widthInches = canvas.width / 300;
+      const heightInches = canvas.height / 300;
+
+      // Create jsPDF instance with custom size
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({
+        orientation: widthInches > heightInches ? 'landscape' : 'portrait',
+        unit: 'in',
+        format: [widthInches, heightInches]
+      });
+
+      // Add image to PDF (fill entire page)
+      pdf.addImage(imgData, 'PNG', 0, 0, widthInches, heightInches);
+
+      // Save PDF
+      pdf.save(`${name.replace(/\s+/g, '_')}_necklace.pdf`);
+
+      console.log('✓ PDF downloaded:', `${name.replace(/\s+/g, '_')}_necklace.pdf`, `(${canvas.width}x${canvas.height}px at 300 DPI)`);
+
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      alert('Failed to generate PDF. Please try again.');
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  img.onerror = () => {
+    console.error('Failed to load SVG image for PDF');
+    alert('Failed to load SVG for PDF export. Please try again.');
+    URL.revokeObjectURL(url);
+  };
+
+  img.src = url;
+}
+
+// Download DXF format
+function downloadDXF() {
+  const name = nameInput.value.trim();
+  if (!name || !getActiveFont()) return;
+
+  try {
+    // Select the SVG and path elements
+    const svgEl = document.querySelector('svg');
+
+    if (!svgEl) {
+      throw new Error('SVG element not found');
+    }
+
+    // Get SVG bounding box
+    const bbox = svgEl.getBBox();
+    const svgHeightUnits = bbox.height;
+
+    const pathEl = svgEl.querySelector('path');
+
+    if (!pathEl) {
+      throw new Error('Path element not found in SVG');
+    }
+
+    // Get the path data
+    const d = pathEl.getAttribute('d');
+
+    if (!d) {
+      throw new Error('Path data not found');
+    }
+
+    // Get target height in millimeters from input
+    const targetHeightMM = parseFloat(document.getElementById('targetHeightInput').value);
+
+    console.log('Converting SVG path to DXF...');
+    console.log('SVG height (units):', svgHeightUnits);
+    console.log('Target height (mm):', targetHeightMM);
+    console.log('Maker.js importer:', makerjs.importer);
+    console.log('Maker.js exporter:', makerjs.exporter);
+
+
+    // Convert SVG path data to Maker.js model
+    const model = makerjs.importer.fromSVGPathData(d);
+
+    if (!model) {
+      throw new Error('Failed to convert path data to Maker.js model');
+    }
+
+    // Scale to match target height in millimeters
+    const scale = targetHeightMM / svgHeightUnits;
+    console.log('Scale factor:', scale);
+    makerjs.model.scale(model, scale);
+    model.units = makerjs.unitType.Millimeter;
+
+
+    // Export to DXF
+    const dxf = makerjs.exporter.toDXF(model);
+
+    // Create blob and download
+    const blob = new Blob([dxf], { type: 'application/dxf' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${name.replace(/\s+/g, '_')}_necklace.dxf`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    console.log('✓ DXF downloaded:', link.download);
+
+  } catch (error) {
+    console.error('Error generating DXF:', error);
+    alert('Failed to generate DXF. Please try again.');
+  }
+}
 
 // Generate laser-cut friendly SVG with proper mm scaling
 function generateLaserCutSVG(name) {
@@ -1360,7 +1698,7 @@ function generateLaserCutSVG(name) {
   <path 
     d="${pathData}" 
     fill="#000000"
-    fill-rule="evenodd"
+    fill-rule="nonzero"
   />
 </svg>`;
 
@@ -2634,14 +2972,57 @@ function applyAutoConnect(glyphItems, options) {
       }
     }
 
+    // For i/j letters, extract only the stem (exclude dot) to prevent false positives
+    // When auto-connect runs after i-dot connection, the dot has already been moved,
+    // but we still want to avoid false positives from other dot positions
+    let leftItem = left.item;
+    let rightItem = right.item;
+
+
+    const isIDotChar = (char) => {
+      const c = char.toLowerCase();
+      return c === 'i' || c === 'j';
+    };
+
+    const getStemOnly = (item, char) => {
+      if (!isIDotChar(char)) {
+        return item;  // Not an i/j, use full item
+      }
+
+      const subPaths = extractSubPaths(item);
+      if (subPaths.length <= 1) {
+        return item;  // Single path, no dot to exclude
+      }
+
+      // Find largest subpath (stem/body)
+      let stem = null;
+      let maxArea = 0;
+      for (const path of subPaths) {
+        const area = Math.abs(path.area);
+        if (area > maxArea) {
+          maxArea = area;
+          stem = path;
+        }
+      }
+
+      return stem || item;
+    };
+
+    leftItem = getStemOnly(leftItem, left.char);
+    rightItem = getStemOnly(rightItem, right.char);
+
+    if (debugLog && (isIDotChar(left.char) || isIDotChar(right.char))) {
+      console.log(`  Using stem-only for overlap check (i/j detected)`);
+    }
+
     // Check actual geometric overlap using boolean intersection
     let currentInter = null;
     let overlapOk = false;
 
     try {
-      currentInter = left.item.intersect(right.item);
+      currentInter = leftItem.intersect(rightItem, { insert: false });
 
-      if (currentInter && currentInter.area > 0.01) {
+      if (currentInter && currentInter.area > 0.001) {  // Lowered threshold for thin connections
         // Intersection exists, check if it meets minimum size
         const interW = currentInter.bounds.width;
         const interH = currentInter.bounds.height;
@@ -2671,6 +3052,26 @@ function applyAutoConnect(glyphItems, options) {
 
     // If overlap is insufficient, auto-tighten
     if (!overlapOk) {
+      // Measure initial gap
+      const gapUnits = right.item.bounds.left - left.item.bounds.right;
+      const gapMm = gapUnits / PX_PER_MM;
+
+      // Safety: Skip extremely large gaps (likely intentional spacing, not script connection)
+      if (gapMm > 15.0) {
+        if (debugLog) {
+          console.log(`  Pair "${left.char}${right.char}": gap ${gapMm.toFixed(3)}mm > 15.0mm → SKIPPED (extremely large, likely intentional)`);
+        }
+        continue;
+      }
+
+      if (debugLog) {
+        if (gapMm < 0) {
+          console.log(`  Pair "${left.char}${right.char}": OVERLAP ${Math.abs(gapMm).toFixed(3)}mm (negative gap) but insufficient → attempting tighten`);
+        } else {
+          console.log(`  Pair "${left.char}${right.char}": gap ${gapMm.toFixed(3)}mm → attempting tighten`);
+        }
+      }
+
       let shiftAccum = 0;
       let finalShift = 0;
       let found = false;
@@ -2689,11 +3090,11 @@ function applyAutoConnect(glyphItems, options) {
         shiftAccum += shiftDelta;
         finalShift += shiftDelta;
 
-        // Re-check overlap
+        // Re-check overlap (use stem-only for i/j)
         try {
-          const testInter = left.item.intersect(right.item);
+          const testInter = leftItem.intersect(rightItem, { insert: false });
 
-          if (testInter && testInter.area > 0.01) {
+          if (testInter && testInter.area > 0.001) {  // Lowered threshold for thin connections
             const interW = testInter.bounds.width;
             const interH = testInter.bounds.height;
             const maxDim = Math.max(interW, interH);
@@ -2748,8 +3149,8 @@ function applyAutoConnect(glyphItems, options) {
           const epsilonUnits = mmToPaperPixels(0.05); // 0.05mm safety margin
           const requiredExtraShift = distanceInfo.minDistance + minOverlapUnits + epsilonUnits;
 
-          // Cap emergency extra to +1.0mm beyond max tighten to avoid crazy collisions
-          const emergencyCapUnits = mmToPaperPixels(1.0);
+          // Cap emergency extra to +2.0mm beyond max tighten (increased for script fonts)
+          const emergencyCapUnits = mmToPaperPixels(2.0);
           const allowedExtraShift = Math.min(requiredExtraShift, emergencyCapUnits);
 
           if (allowedExtraShift > 0) {
@@ -2770,7 +3171,7 @@ function applyAutoConnect(glyphItems, options) {
 
             // Verify the emergency nudge worked
             try {
-              const finalInter = left.item.intersect(right.item);
+              const finalInter = left.item.intersect(right.item, { insert: false });
 
               if (finalInter && finalInter.area > 0.01) {
                 const interW = finalInter.bounds.width;
@@ -2873,6 +3274,148 @@ function applyAutoConnect(glyphItems, options) {
   return glyphItems;
 }
 
+/**
+ * Normalize a Paper.js path for boolean operations.
+ * ZERO normalization - preserves EXACT original font geometry.
+ * Any manipulation (even tiny segment removal) can cause wobbles.
+ */
+function normalizePath(path) {
+  if (!path) return path;
+
+  if (path instanceof paper.CompoundPath) {
+    path.children.forEach(child => {
+      if (child instanceof paper.Path) {
+        normalizePathInternal(child);
+      }
+    });
+  } else if (path instanceof paper.Path) {
+    normalizePathInternal(path);
+  }
+
+  return path;
+}
+
+/**
+ * Internal path normalization for single paths
+ */
+function normalizePathInternal(path) {
+  // COMPLETELY DISABLED - even tiny segment removal causes wobbles
+  // Preserve EXACT original font geometry for perfect rendering
+
+  // All normalization disabled:
+  // - NO flatten (destroys curves)
+  // - NO simplify (removes detail)  
+  // - NO tiny segment removal (causes wobbles)
+  // - NO winding changes (preserve original)
+
+  // Let Paper.js handle paths as-is from the font
+}
+
+/**
+ * Normalize CompoundPath winding using containment-based hole classification.
+ * 
+ * Uses nesting depth to determine if a path is outer/hole/island:
+ * - Depth 0 = outer contour (clockwise)
+ * - Depth 1 = hole (counter-clockwise)
+ * - Depth 2 = island (clockwise)
+ * - etc.
+ * 
+ * CRITICAL: Only call when using fillRule='nonzero' (Sriracha case).
+ * For evenodd, winding doesn't matter.
+ * 
+ * TEST: Sriracha "in", "ci", "cai", "air", "Cain" - i stems visible
+ * TEST: Other fonts - counters/holes preserved (not filled)
+ * 
+ * @param {paper.CompoundPath} compoundPath
+ * @returns {paper.CompoundPath}
+ */
+function normalizeCompoundPathWindingByContainment(compoundPath) {
+  if (!compoundPath || !(compoundPath instanceof paper.CompoundPath)) {
+    return compoundPath;
+  }
+
+  const children = compoundPath.children;
+  if (children.length <= 1) return compoundPath;
+
+  // Get a test point inside each child path
+  const testPoints = [];
+  for (const child of children) {
+    let testPoint = child.bounds.center;
+
+    // If center is not inside, sample points along the path
+    if (!child.contains(testPoint)) {
+      const segments = child.segments;
+      for (let i = 0; i < Math.min(10, segments.length); i++) {
+        const pt = segments[Math.floor(i * segments.length / 10)].point;
+        if (child.contains(pt)) {
+          testPoint = pt;
+          break;
+        }
+      }
+    }
+
+    testPoints.push(testPoint);
+  }
+
+  // Calculate nesting depth for each child
+  const depths = [];
+  for (let i = 0; i < children.length; i++) {
+    let depth = 0;
+    const testPoint = testPoints[i];
+
+    for (let j = 0; j < children.length; j++) {
+      if (i !== j && children[j].contains(testPoint)) {
+        depth++;
+      }
+    }
+
+    depths.push(depth);
+  }
+
+  // Track reversals for debug logging
+  const reversed = [];
+
+  // Normalize winding based on depth parity
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+    const depth = depths[i];
+
+    // Even depth = clockwise (outer/island), Odd depth = counter-clockwise (hole)
+    const shouldBeClockwise = (depth % 2 === 0);
+
+    if (child.clockwise !== shouldBeClockwise) {
+      child.reverse();
+      reversed.push(true);
+    } else {
+      reversed.push(false);
+    }
+  }
+
+  // Debug logging
+  if (typeof currentSettings !== 'undefined' && currentSettings.debugMode) {
+    console.log('Winding normalization by containment:');
+    const table = children.map((child, i) => ({
+      index: i,
+      depth: depths[i],
+      shouldBeClockwise: depths[i] % 2 === 0,
+      actualClockwise: child.clockwise,
+      wasReversed: reversed[i]
+    }));
+    console.table(table);
+  }
+
+  return compoundPath;
+}
+
+/**
+ * Get the current active font key.
+ * @returns {string} - Font key (e.g., 'sriracha', 'pacifico')
+ */
+function getFontKeyForActiveFont() {
+  return activeFontKey || 'pacifico';
+}
+
+
 // Apply Paper.js boolean union operation to merge overlapping paths
 // This function takes the text and generates separate paths for each letter,
 // then unites them using Paper.js
@@ -2952,18 +3495,8 @@ function applyPaperJsUnion(text, fontSize, letterSpacing, pairSpacingMap = {}) {
 
     console.log(`Successfully extracted ${pathItems.length} path objects`);
 
-    // Apply auto-connect if enabled (before i-dot connection and union)
-    if (currentSettings.autoConnect) {
-      console.log('🔗 Auto-connect enabled: checking adjacent letter overlaps...');
-      applyAutoConnect(glyphItems, {
-        minOverlapMm: currentSettings.autoConnectMinOverlap,
-        maxTightenMm: currentSettings.autoConnectMaxTighten,
-        debugLog: currentSettings.autoConnectDebugLog,
-        debugMarkers: currentSettings.autoConnectDebugMarkers
-      });
-    }
-
-    // Before union: Connect i-dots to stems if enabled
+    // CRITICAL: Connect i-dots FIRST (before auto-connect)
+    // This prevents auto-connect from seeing false overlaps from i-dots that will be moved
     if (currentSettings.connectIDots) {
       console.log('🔵 Attempting per-glyph i-dot connection...');
 
@@ -2975,63 +3508,93 @@ function applyPaperJsUnion(text, fontSize, letterSpacing, pairSpacingMap = {}) {
         searchRadiusMm: currentSettings.iDotSearchRadius
       });
 
-      console.log(`After i-dot connection: ${pathItems.length} paths ready for union`);
+      console.log(`After i-dot connection: ${pathItems.length} paths ready for auto-connect`);
     }
 
-    // Unite all text paths first (before adding loops)
-    console.log(`Starting union of ${pathItems.length} text paths...`);
+    // Apply auto-connect AFTER i-dot connection (uses post-shift geometry)
+    if (currentSettings.autoConnect) {
+      console.log('🔗 Auto-connect enabled: checking adjacent letter overlaps...');
+      applyAutoConnect(glyphItems, {
+        minOverlapMm: currentSettings.autoConnectMinOverlap,
+        maxTightenMm: currentSettings.autoConnectMaxTighten,
+      });
+    }
 
-    let result = pathItems[0];
+    // === NORMALIZE ALL PATHS BEFORE BOOLEAN OPERATIONS ===
+    console.log(`Normalizing ${pathItems.length} paths before union...`);
 
-    for (let i = 1; i < pathItems.length; i++) {
+    // Use default nonzero fillRule for correct font rendering
+
+    const normalizedPaths = [];
+    for (let i = 0; i < pathItems.length; i++) {
       try {
-        const isLoop = i >= pathItems.length - (currentSettings.addLoops ? 2 : 0);
-        console.log(`Uniting ${isLoop ? 'LOOP' : 'letter'} ${i + 1} (${pathItems[i].constructor.name}) with result (${result.constructor.name})...`);
-        if (isLoop && currentSettings.debugMode) {
-          console.log(`  Loop bounds: top=${pathItems[i].bounds.top.toFixed(2)}, bottom=${pathItems[i].bounds.bottom.toFixed(2)}, left=${pathItems[i].bounds.left.toFixed(2)}, right=${pathItems[i].bounds.right.toFixed(2)}`);
-          console.log(`  Result bounds before: top=${result.bounds.top.toFixed(2)}, bottom=${result.bounds.bottom.toFixed(2)}, left=${result.bounds.left.toFixed(2)}, right=${result.bounds.right.toFixed(2)}`);
+        const normalized = normalizePath(pathItems[i].clone());
 
-          // Check if loop intersects with result
-          const intersects = result.intersects(pathItems[i]);
-          const intersection = result.intersect(pathItems[i], { insert: false });
-          const hasIntersectionArea = intersection && Math.abs(intersection.area) > 0.01;
+        // Preserve default nonzero fillRule from font
 
-          console.log(`  Intersection test: ${intersects ? 'YES' : 'NO'}`);
-          console.log(`  Intersection area: ${intersection ? Math.abs(intersection.area).toFixed(2) : '0.00'}px² ${hasIntersectionArea ? '✓' : '✗ (no actual overlap!)'}`);
+        normalizedPaths.push(normalized);
+        pathItems[i].remove();
 
-          if (intersection) {
-            intersection.remove(); // Clean up test object
-          }
+        if (currentSettings.debugMode) {
+          console.log(`  ✓ Normalized path ${i + 1}/${pathItems.length} (fillRule=evenodd)`);
         }
+      } catch (err) {
+        console.error(`Error normalizing path ${i + 1}:`, err);
+        // Keep original if normalization fails
+        // Keep original on normalization failure
+        normalizedPaths.push(pathItems[i]);
+      }
+    }
 
-        const newResult = result.unite(pathItems[i]);
+    console.log(`✓ Normalized ${normalizedPaths.length} paths`);
+
+    // === PERFORM ONE GLOBAL UNION ===
+    console.log(`Starting global union of ${normalizedPaths.length} paths...`);
+
+    let result = normalizedPaths[0];
+
+    for (let i = 1; i < normalizedPaths.length; i++) {
+      try {
+        console.log(`  Uniting path ${i + 1}/${normalizedPaths.length}...`);
+
+        // Preserve nonzero fillRule during unite
+
+        const newResult = result.unite(normalizedPaths[i]);
 
         if (!newResult) {
-          console.error(`Unite operation for ${isLoop ? 'LOOP' : 'letter'} ${i + 1} returned null!`);
+          console.error(`Unite operation for path ${i + 1} returned null!`);
+          console.warn(`⚠️ Keeping both shapes separately`);
           continue;
         }
 
-        if (isLoop) {
-          console.log(`  Result bounds after: top=${newResult.bounds.top.toFixed(2)}, bottom=${newResult.bounds.bottom.toFixed(2)}`);
-          const boundsChanged = Math.abs(newResult.bounds.top - result.bounds.top) > 0.01;
-          console.log(`  ${boundsChanged ? '✓ BOUNDS CHANGED - union worked!' : '⚠️ BOUNDS UNCHANGED - union may have failed!'}`);
-        }
-        console.log(`✓ Unite successful, result is ${newResult.constructor.name}`);
-
-        // Clean up old objects
-        if (result !== pathItems[0]) {
+        // Clean up
+        if (result !== normalizedPaths[0]) {
           result.remove();
         }
-        pathItems[i].remove();
+        normalizedPaths[i].remove();
 
         result = newResult;
 
       } catch (uniteError) {
-        console.error(`Error uniting letter ${i + 1}:`, uniteError);
-        console.error('Stack:', uniteError.stack);
-        // Continue with current result
+        console.error(`Error uniting path ${i + 1}:`, uniteError);
+        // Continue with next path
       }
     }
+
+    // === VALIDATE GEOMETRY ===
+    if (result.children && result.children.length > 1) {
+      console.warn(`⚠️ Geometry fragmentation detected: ${result.children.length} separate components`);
+      if (currentSettings.debugMode) {
+        result.children.forEach((child, i) => {
+          console.log(`  Component ${i + 1}: ${child.constructor.name}, area=${Math.abs(child.area).toFixed(2)}`);
+        });
+      }
+    }
+
+    // Preserve nonzero fillRule for export
+    result.fillRule = 'nonzero';
+
+    console.log(`✓ Global union complete`);
 
     // After uniting all text, attach loops if enabled
     if (currentSettings.addLoops) {
@@ -3070,10 +3633,12 @@ function applyPaperJsUnion(text, fontSize, letterSpacing, pairSpacingMap = {}) {
       console.log('═══════════════════════════════════════════════════════');
 
       result = applyStrengthenOffset(result, currentSettings.strengthenAmount, currentSettings.debugMode);
-
       console.log('═══════════════════════════════════════════════════════');
       console.log('');
     }
+
+    // Ensure nonzero fillRule before export
+    result.fillRule = 'nonzero';
 
     // Export the unified path back to SVG path data
     console.log(`Exporting result (${result.constructor.name})...`);
