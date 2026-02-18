@@ -23,6 +23,13 @@
           <input type="text" id="nameInput" placeholder="Type a name..." maxlength="20" class="name-input">
           <select id="fontSelect" class="font-select">
             <option value="pacifico">Pacifico</option>
+            <option value="cookie">Cookie</option>
+            <option value="dancing-script">Dancing Script</option>
+            <option value="norican">Norican</option>
+            <option value="rochester">Rochester</option>
+            <option value="satisfy">Satisfy</option>
+            <option value="sriracha">Sriracha</option>
+            <option value="style-script">Style Script</option>
             <option value="custom_upload">Custom font</option>
           </select>
           <input type="file" id="fontUpload" accept=".ttf,.otf,font/ttf,font/otf" style="display:none">
@@ -51,10 +58,16 @@
       </div>
     </div>
 
-    <!-- Download Button (primary CTA) -->
-    <button id="downloadBtn" class="download-btn" disabled>
-      Download SVG
-    </button>
+    <!-- Download Section -->
+    <div class="container-download">
+      <button id="downloadBtn" class="download-btn" disabled>Download</button>
+      <select id="formatSelect" class="format-select" disabled>
+        <option value="svg" selected>SVG</option>
+        <option value="png">PNG</option>
+        <option value="pdf">PDF</option>
+        <option value="dxf">DXF</option>
+      </select>
+    </div>
 
     <!-- Feedback Link (optional, non-intrusive) -->
     <div class="feedback-link">
@@ -280,6 +293,9 @@
 
   <!-- Hidden canvas for Paper.js operations -->
   <canvas id="paperCanvas" style="display: none;"></canvas>
+
+  <!-- jsPDF library for PDF export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
   <script type="module" src="/main.js"></script>
 </body>
