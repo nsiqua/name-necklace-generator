@@ -44,6 +44,37 @@ const makerjs = makerjsNS.default ?? makerjsNS;
 import opentype from 'opentype.js';
 import paper from 'paper';
 import ClipperLib from 'clipper-lib';
+import { initAuth, appState, refreshCredits } from './auth.js';
+import { supabase } from './supabaseClient.js';
+
+// Initialise Supabase auth UI (account widget + modal).
+// `appState` is the live singleton — always up-to-date after every identity event.
+// The callback is invoked whenever identity or credits change.
+initAuth((identity) => {
+  // identity === appState (same object reference)
+  // Use identity.credits_balance / identity.unlimited_until to gate downloads.
+  // Example (add when ready):
+  //   if (identity.credits_balance !== null && identity.credits_balance <= 0) showPaywall();
+});
+
+// ── Dev helper (DEV builds only) ──────────────────────────────────────────────
+// Usage in console:
+//   window.__auth.getState()
+//   await window.__auth.refreshCredits()
+//   await window.__auth.supabase.auth.getSession()
+if (import.meta.env.DEV) {
+  import('./supabaseClient.js').then(({ supabase }) => {
+    window.__auth = {
+      supabase,
+      getState: () => ({ ...appState }),
+      refreshCredits: () => refreshCredits(),
+    };
+    console.log('[dev] 🛠️  window.__auth available.',
+      '\n  window.__auth.getState()         → current identity + credits',
+      '\n  await window.__auth.refreshCredits() → re-fetch from edge function');
+  });
+}
+
 
 // Get DOM elements
 const nameInput = document.getElementById('nameInput');
@@ -1366,12 +1397,275 @@ function autoFitViewBox() {
 }
 
 // Download file based on selected format
-downloadBtn.addEventListener('click', () => {
+// ── Paywall modal wiring ──────────────────────────────────────────────────────
+// (DOM is ready by the time this module executes)
+const _paywallModal = document.getElementById('paywallModal');
+const _paywallClose = document.getElementById('paywallClose');
+const _paywallGuest = document.getElementById('paywallGuest');
+const _paywallUser = document.getElementById('paywallUser');
+const _paywallSignIn = document.getElementById('paywallSignIn');
+
+function _showPaywall(isGuest) {
+  _paywallGuest.style.display = isGuest ? '' : 'none';
+  _paywallUser.style.display = isGuest ? 'none' : '';
+  _paywallModal.style.display = 'flex';
+}
+
+function _hidePaywall() {
+  _paywallModal.style.display = 'none';
+}
+
+_paywallClose.addEventListener('click', _hidePaywall);
+_paywallModal.addEventListener('click', e => { if (e.target === _paywallModal) _hidePaywall(); });
+
+// "Sign in / Create account" in the guest paywall — open the auth modal
+_paywallSignIn.addEventListener('click', () => {
+  _hidePaywall();
+  document.getElementById('authBtn').click(); // reuse existing auth modal trigger
+});
+
+// ── Toast helper ──────────────────────────────────────────────────────────────
+const _toast = document.getElementById('creditToast');
+let _toastTimer = null;
+
+function showToast(message, durationMs = 4000) {
+  _toast.textContent = message;
+  _toast.classList.add('visible');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => {
+    _toast.classList.remove('visible');
+  }, durationMs);
+}
+
+// ── Feedback bonus wiring ─────────────────────────────────────────────────────
+const FEEDBACK_LS_KEY = 'feedback_started_at';
+const FEEDBACK_DELAY_MS = 30_000; // must wait 30s before claiming
+
+const _feedbackLink = document.getElementById('feedbackLink');
+const _feedbackClaimBtn = document.getElementById('feedbackClaimBtn');
+let _feedbackRevealTimer = null;
+
+/** Save timestamp when user clicks the feedback link. */
+_feedbackLink.addEventListener('click', () => {
+  localStorage.setItem(FEEDBACK_LS_KEY, String(Date.now()));
+  console.log('[feedback] link clicked — feedback_started_at saved');
+  _scheduleFeedbackReveal();
+});
+
+/** Show/hide claim button based on localStorage + 30s elapsed. */
+function showClaimBtnIfEligible() {
+  const ts = Number(localStorage.getItem(FEEDBACK_LS_KEY) ?? 0);
+  if (!ts) {
+    _feedbackClaimBtn.style.display = 'none';
+    return;
+  }
+  const elapsed = Date.now() - ts;
+  if (elapsed >= FEEDBACK_DELAY_MS) {
+    _feedbackClaimBtn.style.display = '';  // show immediately
+  } else {
+    _feedbackClaimBtn.style.display = 'none';
+    _scheduleFeedbackReveal(FEEDBACK_DELAY_MS - elapsed);
+  }
+}
+
+function _scheduleFeedbackReveal(remainingMs) {
+  clearTimeout(_feedbackRevealTimer);
+  const delay = remainingMs ?? FEEDBACK_DELAY_MS;
+  _feedbackRevealTimer = setTimeout(() => {
+    showClaimBtnIfEligible();
+  }, delay);
+}
+
+/** Handle claim button click. */
+_feedbackClaimBtn.addEventListener('click', async () => {
+  _feedbackClaimBtn.disabled = true;
+  _feedbackClaimBtn.textContent = 'Claiming…';
+
+  try {
+    const isGuest = appState.type === 'guest';
+    const { data, error } = await supabase.functions.invoke('claim_feedback_bonus', {
+      body: { guest_id: isGuest ? appState.guestId : undefined },
+    });
+
+    if (error) {
+      console.warn('[feedback] invoke error:', error.message);
+      showToast('⚠️ Could not claim credits — please try again.');
+      return;
+    }
+
+    if (data?.ok) {
+      localStorage.removeItem(FEEDBACK_LS_KEY);
+      _feedbackClaimBtn.style.display = 'none';
+      showToast('🎉 +5 credits added — thanks for your feedback!');
+      refreshCredits().catch(() => { });
+    } else if (data?.code === 'ALREADY_GRANTED') {
+      localStorage.removeItem(FEEDBACK_LS_KEY);
+      _feedbackClaimBtn.style.display = 'none';
+      showToast('Feedback credits already claimed recently.');
+    } else {
+      console.warn('[feedback] unexpected response:', data);
+      showToast('⚠️ Something went wrong — please try again.');
+    }
+  } catch (err) {
+    console.error('[feedback] claim threw:', err.message);
+    showToast('⚠️ Could not claim credits — please try again.');
+  } finally {
+    _feedbackClaimBtn.disabled = false;
+    _feedbackClaimBtn.textContent = 'Claim +5 feedback credits';
+  }
+});
+
+// Check on page load (in case user clicked the link in a prior session)
+showClaimBtnIfEligible();
+
+// ── Credits shop modal ────────────────────────────────────────────────────────
+const _shopModal = document.getElementById('shopModal');
+const _shopClose = document.getElementById('shopClose');
+const _paywallBuy = document.getElementById('paywallBuy');
+
+function _openShop() {
+  _shopModal.style.display = 'flex';
+}
+function _closeShop() {
+  _shopModal.style.display = 'none';
+}
+
+_shopClose.addEventListener('click', _closeShop);
+_shopModal.addEventListener('click', e => { if (e.target === _shopModal) _closeShop(); });
+
+// "Buy credits" in paywall (registered-user variant) → open shop
+_paywallBuy.addEventListener('click', () => {
+  _hidePaywall();
+  _openShop();
+});
+
+// Pack card clicks → call create_checkout_session → redirect to Stripe
+_shopModal.addEventListener('click', async (e) => {
+  const card = e.target.closest('[data-pack]');
+  if (!card || card.disabled) return;
+
+  const pack = card.dataset.pack;
+
+  // Disable all cards while redirecting
+  _shopModal.querySelectorAll('.pack-card').forEach(c => {
+    c.disabled = true;
+    c.style.opacity = '0.6';
+  });
+  card.textContent = 'Redirecting…';
+
+  try {
+    const isGuest = appState.type === 'guest';
+    const { data, error } = await supabase.functions.invoke('create_checkout_session', {
+      body: { pack, guest_id: isGuest ? appState.guestId : undefined },
+    });
+
+    if (error || !data?.url) {
+      const msg = error?.message ?? data?.message ?? 'Unknown error';
+      console.error('[shop] checkout session error:', msg);
+      showToast(`⚠️ Could not start checkout — ${msg}`);
+      // Re-enable cards
+      _shopModal.querySelectorAll('.pack-card').forEach(c => {
+        c.disabled = false;
+        c.style.opacity = '';
+      });
+      // Restore card label
+      location.reload();
+      return;
+    }
+
+    // Redirect to Stripe Checkout
+    window.location.href = data.url;
+
+  } catch (err) {
+    console.error('[shop] unexpected error:', err.message);
+    showToast('⚠️ Could not start checkout — please try again.');
+    _closeShop();
+  }
+});
+
+// ── Handle return from Stripe Checkout (URL params) ───────────────────────────
+(function handleStripeReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const payment = params.get('payment');
+
+  if (payment === 'success') {
+    showToast('🎉 Payment successful! Your credits have been added.', 6000);
+    refreshCredits().catch(() => { });
+    // Clean query param from URL
+    const clean = window.location.pathname + window.location.hash;
+    history.replaceState(null, '', clean);
+  } else if (payment === 'cancelled') {
+    showToast('Payment cancelled — no charge made.', 4000);
+    const clean = window.location.pathname + window.location.hash;
+    history.replaceState(null, '', clean);
+  }
+})();
+
+
+// ── requestDownloadPermission ─────────────────────────────────────────────────
+/**
+ * Call consume_download_credit Edge Function before every download.
+ *
+ * Returns true  → credit consumed (or unlimited), caller may proceed.
+ * Returns false → no credits or error, caller must abort; paywall already shown.
+ *
+ * @param {string} format  'svg' | 'png' | 'pdf' | 'dxf'
+ * @returns {Promise<boolean>}
+ */
+async function requestDownloadPermission(format) {
+  // appState and refreshCredits imported at top of file from './auth.js'
+  const isGuest = appState.type === 'guest';
+
+  try {
+    const { data, error } = await supabase.functions.invoke('consume_download_credit', {
+      body: {
+        format,
+        guest_id: isGuest ? appState.guestId : undefined,
+      },
+    });
+
+    if (error) {
+      // Network / cold-start failure — allow download so the user isn't blocked
+      console.warn('[credits] consume_download_credit invoke error:', error.message, '— allowing download');
+      return true;
+    }
+
+    if (data?.ok) {
+      console.log('[credits] ✅ permission granted:', data);
+      // Refresh badge asynchronously — don't block the download
+      refreshCredits().catch(() => { });
+      return true;
+    }
+
+    if (data?.code === 'NO_CREDITS') {
+      console.log('[credits] ❌ no credits — showing paywall');
+      _showPaywall(isGuest);
+      return false;
+    }
+
+    // Any other error code (NOT_FOUND, DB_ERROR…) — allow download to avoid
+    // accidental blocking of legitimate users when the backend has issues
+    console.warn('[credits] unexpected response, allowing download:', data);
+    return true;
+
+  } catch (err) {
+    console.warn('[credits] requestDownloadPermission threw:', err.message, '— allowing download');
+    return true;
+  }
+}
+
+// ── Download button handler (async) ──────────────────────────────────────────
+downloadBtn.addEventListener('click', async () => {
   const name = nameInput.value.trim();
   if (!name || !getActiveFont()) return;
 
   const selectedFormat = formatSelect.value;
 
+  // Gate on credits — returns false and shows paywall if no credits left
+  const allowed = await requestDownloadPermission(selectedFormat);
+  if (!allowed) return;
+
+  // Existing download logic — completely unchanged
   if (selectedFormat === 'png') {
     downloadPNG();
   } else if (selectedFormat === 'pdf') {
@@ -1382,6 +1676,7 @@ downloadBtn.addEventListener('click', () => {
     downloadSVG();
   }
 });
+
 
 // Download SVG function
 function downloadSVG() {
