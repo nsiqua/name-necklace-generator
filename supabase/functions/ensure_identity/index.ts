@@ -44,14 +44,16 @@ Deno.serve(async (req) => {
         let user: { id: string; email?: string } | null = null;
 
         if (authHeader?.startsWith('Bearer ')) {
-            // Verify the JWT using the anon client (safe — only reads token claims)
+            // Verify the JWT using the anon client — must pass token explicitly in Deno
+            // (no session storage exists, so getUser() without a token sends null → 401)
+            const token = authHeader.slice(7);
             const anonClient = createClient(
                 Deno.env.get('SUPABASE_URL')!,
                 Deno.env.get('SUPABASE_ANON_KEY')!,
-                { global: { headers: { Authorization: authHeader } } }
             );
-            const { data: { user: u }, error } = await anonClient.auth.getUser();
+            const { data: { user: u }, error } = await anonClient.auth.getUser(token);
             if (!error && u) user = u;
+            else if (error) console.warn('[ensure_identity] getUser error:', error.message);
         }
 
         // ── Parse body ────────────────────────────────────────────────────────

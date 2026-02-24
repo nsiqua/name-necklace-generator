@@ -17,11 +17,12 @@
     <div id="accountWidget" class="account-widget">
       <span id="accountEmail" class="account-email">Guest</span>
       <span id="creditBadge" class="credit-badge" style="display:none"></span>
+      <button id="buyCreditsBtn" class="buy-credits-badge" style="display:none">🛒 Buy Credits</button>
       <button id="feedbackClaimBtn" class="feedback-claim-btn" style="display:none">Claim +5 feedback credits</button>
       <button id="authBtn" class="small-btn">Sign in</button>
       <button id="signOutBtn" class="small-btn auth-signout-btn" style="display:none">Sign out</button>
     </div>
-    <p id="sessionStatus" class="session-status">Session: checking…</p>
+    <p id="sessionStatus" class="session-status" style="display:none">Session: checking…</p>
 
     <!-- ============================================ -->
     <!-- BASIC SECTION (always visible, minimal UI) -->
@@ -367,10 +368,10 @@
       <!-- Guest variant -->
       <div id="paywallGuest">
         <div class="paywall-icon">🔒</div>
-        <h2 id="paywallTitle" class="auth-modal-title">Free downloads used up</h2>
-        <p class="paywall-desc">Create a free account to get <strong>10 download credits</strong> — no payment required.
-        </p>
-        <button id="paywallSignIn" class="download-btn" style="width:100%;margin-bottom:10px">Sign in / Create
+        <h2 id="paywallTitle" class="auth-modal-title">Log in to get more free credits</h2>
+        <p class="paywall-desc">Create a free account and get <strong>10 free credits</strong> instantly — no payment
+          required.</p>
+        <button id="paywallSignIn" class="download-btn" style="width:100%;margin-bottom:10px">Sign in / Create free
           account</button>
         <p class="paywall-sub">Already have an account? Sign in to restore your credits.</p>
       </div>
@@ -379,16 +380,28 @@
       <div id="paywallUser" style="display:none">
         <div class="paywall-icon">✨</div>
         <h2 class="auth-modal-title">You're out of credits</h2>
-        <p class="paywall-desc">Help improve this tool or purchase more credits to keep downloading.</p>
-        <a href="https://forms.gle/xJqc36EL6Xc5WTg2A" target="_blank" rel="noopener noreferrer"
-          class="download-btn paywall-feedback-btn">💬 Leave feedback (free credits coming)</a>
+        <p class="paywall-desc">Leave feedback to get <strong>+5 free credits</strong>, or purchase more to keep
+          downloading.</p>
+        <a id="paywallFeedbackLink"
+          href="https://docs.google.com/forms/d/e/1FAIpQLSdmbMUth7tq-Squ1laRLS0-dN9NSDc2re519glJ1tzTi9BvPg/viewform"
+          target="_blank" rel="noopener noreferrer" class="download-btn paywall-feedback-btn">💬 Leave feedback — get +5
+          credits</a>
         <div class="auth-divider"><span>or</span></div>
         <button id="paywallBuy" class="download-btn" style="width:100%">🛒 Buy credits</button>
+      </div>
+
+      <!-- Already-claimed variant -->
+      <div id="paywallAlreadyClaimed" style="display:none">
+        <div class="paywall-icon">🎁</div>
+        <h2 class="auth-modal-title">Feedback credits already claimed</h2>
+        <p class="paywall-desc">You've already received your <strong>+5 feedback credits</strong>. Purchase more credits
+          to continue downloading.</p>
+        <button id="paywallAlreadyClaimedBuy" class="download-btn" style="width:100%">🛒 Buy credits</button>
       </div>
     </div>
   </div>
 
-  <!-- Credits shop modal -->
+  <!-- Credits shop modal (sibling of paywallModal, NOT nested inside it) -->
   <div id="shopModal" class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="shopTitle"
     style="display:none">
     <div class="auth-modal-box shop-box">

@@ -52,6 +52,7 @@ export let currentIdentity = appState; // backward-compat alias
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 let _accountEmail;
 let _creditBadge;
+let _buyCreditsBtn;
 let _sessionStatus;
 let _authBtn;
 let _signOutBtn;
@@ -130,10 +131,22 @@ function updateWidget(user, identity) {
     }
 
     // ── Credit badge
+    const unlimitedDate = identity?.unlimited_until ? new Date(identity.unlimited_until) : null;
+    const unlimitedLabel = unlimitedDate
+        ? unlimitedDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+        : null;
+
+    // Show "Buy Credits" button in place of the badge when credits are 0
+    // and the feedback bonus has already been claimed.
+    const feedbackClaimed = !!localStorage.getItem('feedback_claimed_ever');
+    const showBuyBtn = credits === 0 && feedbackClaimed && !unlimited;
+
     if (_creditBadge) {
-        if (unlimited) {
-            _creditBadge.textContent = '∞';
-            _creditBadge.title = 'Unlimited downloads active';
+        if (showBuyBtn) {
+            _creditBadge.style.display = 'none';
+        } else if (unlimited && unlimitedLabel) {
+            _creditBadge.textContent = `Unlimited until ${unlimitedLabel}`;
+            _creditBadge.title = `Unlimited downloads active until ${unlimitedDate.toDateString()}`;
             _creditBadge.style.display = '';
         } else if (credits !== null && credits !== undefined) {
             _creditBadge.textContent = `${credits} cr`;
@@ -144,18 +157,22 @@ function updateWidget(user, identity) {
         }
     }
 
+    if (_buyCreditsBtn) {
+        _buyCreditsBtn.style.display = showBuyBtn ? '' : 'none';
+    }
+
     // ── Session-status line
     if (_sessionStatus) {
         if (identity?.error) {
             _sessionStatus.textContent = 'Session: error (see console)';
             _sessionStatus.style.color = '#c62828';
         } else if (user) {
-            const credStr = unlimited ? '∞' : credits !== null ? ` · ${credits} cr` : '';
+            const credStr = unlimited ? ` · Unlimited until ${unlimitedLabel}` : credits !== null ? ` · ${credits} cr` : '';
             _sessionStatus.textContent = `Session: ${user.email}${credStr}`;
             _sessionStatus.style.color = '#2e7d32';
         } else {
             const s = (identity?.guestId ?? identity?.guest_id ?? '').slice(-6) || '……';
-            const credStr = unlimited ? ' · ∞' : credits !== null ? ` · ${credits} cr` : '';
+            const credStr = unlimited ? ` · Unlimited until ${unlimitedLabel}` : credits !== null ? ` · ${credits} cr` : '';
             _sessionStatus.textContent = `Session: Guest ·${s}${credStr}`;
             _sessionStatus.style.color = '#888';
         }
@@ -289,6 +306,7 @@ export function initAuth(onIdentityChange = () => { }) {
     // ── Grab DOM refs
     _accountEmail = document.getElementById('accountEmail');
     _creditBadge = document.getElementById('creditBadge');
+    _buyCreditsBtn = document.getElementById('buyCreditsBtn');
     _sessionStatus = document.getElementById('sessionStatus');
     _authBtn = document.getElementById('authBtn');
     _signOutBtn = document.getElementById('signOutBtn');

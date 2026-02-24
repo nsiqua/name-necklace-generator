@@ -51,13 +51,16 @@ Deno.serve(async (req) => {
         let userId: string | null = null;
 
         if (authHeader?.startsWith('Bearer ')) {
+            // In Deno there is no session storage, so we MUST pass the raw token
+            // explicitly. auth.getUser() without a token sends null → 401.
+            const token = authHeader.slice(7); // strip 'Bearer '
             const anonClient = createClient(
                 Deno.env.get('SUPABASE_URL')!,
                 Deno.env.get('SUPABASE_ANON_KEY')!,
-                { global: { headers: { Authorization: authHeader } } }
             );
-            const { data: { user }, error } = await anonClient.auth.getUser();
+            const { data: { user }, error } = await anonClient.auth.getUser(token);
             if (!error && user) userId = user.id;
+            else if (error) console.warn('[create_checkout_session] getUser error:', error.message);
         }
 
         const body: { pack?: string; guest_id?: string } = await req.json().catch(() => ({}));
@@ -68,7 +71,7 @@ Deno.serve(async (req) => {
             return json({
                 ok: false, code: 'INVALID_PACK',
                 message: `Unknown pack "${pack}". Valid: ${Object.keys(PACKS).join(', ')}`
-            }, 400);
+            }, 200);
         }
 
         // Validate identity
@@ -76,20 +79,33 @@ Deno.serve(async (req) => {
             return json({
                 ok: false, code: 'UNAUTHENTICATED',
                 message: 'Provide Authorization header or guest_id'
-            }, 401);
+            }, 200);
         }
         if (!userId && guest_id && !UUID_RE.test(guest_id)) {
             return json({
                 ok: false, code: 'INVALID_GUEST_ID',
                 message: 'guest_id must be a UUID v4'
-            }, 400);
+            }, 200);
         }
 
         const packDef = PACKS[pack];
-        const successUrl = `${Deno.env.get('FRONTEND_SUCCESS_URL')}?session_id={CHECKOUT_SESSION_ID}`;
-        const cancelUrl = Deno.env.get('FRONTEND_CANCEL_URL')!;
+
+        // Validate required env vars before calling Stripe
+        const stripeKey = Deno.env.get('STRIPE_SECRET_KEY');
+        const successUrl = Deno.env.get('FRONTEND_SUCCESS_URL');
+        const cancelUrl = Deno.env.get('FRONTEND_CANCEL_URL');
+
+        if (!stripeKey) {
+            console.error('[create_checkout_session] STRIPE_SECRET_KEY not set');
+            return json({ ok: false, code: 'CONFIG_ERROR', message: 'STRIPE_SECRET_KEY not configured' }, 200);
+        }
+        if (!successUrl || !cancelUrl) {
+            console.error('[create_checkout_session] FRONTEND_SUCCESS_URL or FRONTEND_CANCEL_URL not set');
+            return json({ ok: false, code: 'CONFIG_ERROR', message: 'Frontend URL env vars not configured' }, 200);
+        }
 
         // ── Create Stripe Checkout Session ────────────────────────────────────────
+        console.log('[create_checkout_session] creating session', { pack, userId, guest_id });
         const session = await stripe.checkout.sessions.create({
             mode: 'payment',
             payment_method_types: ['card'],
@@ -111,11 +127,11 @@ Deno.serve(async (req) => {
                 ...(userId ? { user_id: userId } : {}),
                 ...(guest_id ? { guest_id: guest_id } : {}),
             },
-            success_url: successUrl,
+            success_url: `${successUrl}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: cancelUrl,
         });
 
-        console.log('[create_checkout_session]', { pack, userId, guest_id, sessionId: session.id });
+        console.log('[create_checkout_session] ✅', { pack, userId, guest_id, sessionId: session.id });
         return json({ ok: true, url: session.url });
 
     } catch (err) {
@@ -123,6 +139,7 @@ Deno.serve(async (req) => {
         return json({
             ok: false, code: 'INTERNAL_ERROR',
             message: (err as Error).message
-        }, 500);
+        }, 200);
     }
 });
+

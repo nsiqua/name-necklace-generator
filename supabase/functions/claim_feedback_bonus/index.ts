@@ -1,5 +1,5 @@
 // supabase/functions/claim_feedback_bonus/index.ts
-// Deploy: npx supabase functions deploy claim_feedback_bonus
+// Deploy: npx supabase functions deploy claim_feedback_bonus --no-verify-jwt
 //
 // Awards +5 credits for feedback. Server-enforced: 1 per identity per 30 days.
 //
@@ -38,18 +38,21 @@ Deno.serve(async (req) => {
             { auth: { persistSession: false } }
         );
 
-        // ── Verify JWT (if present) ───────────────────────────────────────────
+        // ── Verify JWT (if present) — must pass token explicitly in Deno ─────
         const authHeader = req.headers.get('Authorization');
         let user: { id: string } | null = null;
 
         if (authHeader?.startsWith('Bearer ')) {
+            // In Deno there is no session storage, so we MUST pass the raw token
+            // explicitly. auth.getUser() without a token sends null → 401.
+            const token = authHeader.slice(7);
             const anonClient = createClient(
                 Deno.env.get('SUPABASE_URL')!,
                 Deno.env.get('SUPABASE_ANON_KEY')!,
-                { global: { headers: { Authorization: authHeader } } }
             );
-            const { data: { user: u }, error } = await anonClient.auth.getUser();
+            const { data: { user: u }, error } = await anonClient.auth.getUser(token);
             if (!error && u) user = u;
+            else if (error) console.warn('[claim_feedback_bonus] getUser error:', error.message);
         }
 
         // ── Parse body ────────────────────────────────────────────────────────
@@ -63,16 +66,18 @@ Deno.serve(async (req) => {
             userId = user.id;
         } else if (guest_id) {
             if (!UUID_RE.test(guest_id)) {
+                // Return 200 so supabase-js puts it in data, not error
                 return json({
                     ok: false, code: 'INVALID_GUEST_ID',
                     message: 'guest_id must be a UUID v4'
-                }, 400);
+                });
             }
         } else {
+            // Return 200 so supabase-js puts it in data, not error
             return json({
                 ok: false, code: 'UNAUTHENTICATED',
                 message: 'Provide Authorization header or guest_id'
-            }, 401);
+            });
         }
 
         // ── Call atomic SQL function ──────────────────────────────────────────

@@ -652,6 +652,32 @@ input[type="text"]:focus {
   border-radius: 20px;
 }
 
+/* Shown in place of .credit-badge when credits = 0 and feedback bonus is exhausted */
+.buy-credits-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: linear-gradient(135deg, #f7971e 0%, #e55353 100%);
+  color: white;
+  font-size: 0.78em;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.15s;
+  white-space: nowrap;
+}
+
+.buy-credits-badge:hover {
+  opacity: 0.88;
+  transform: translateY(-1px);
+}
+
+.buy-credits-badge:active {
+  transform: translateY(0);
+}
+
 .auth-signout-btn {
   background: linear-gradient(135deg, #e55353 0%, #c0392b 100%);
 }

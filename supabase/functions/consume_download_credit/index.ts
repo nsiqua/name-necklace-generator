@@ -48,13 +48,14 @@ Deno.serve(async (req) => {
         let user: { id: string; email?: string } | null = null;
 
         if (authHeader?.startsWith('Bearer ')) {
+            const token = authHeader.slice(7); // strip 'Bearer ' — must be explicit in Deno
             const anonClient = createClient(
                 Deno.env.get('SUPABASE_URL')!,
                 Deno.env.get('SUPABASE_ANON_KEY')!,
-                { global: { headers: { Authorization: authHeader } } }
             );
-            const { data: { user: u }, error } = await anonClient.auth.getUser();
+            const { data: { user: u }, error } = await anonClient.auth.getUser(token);
             if (!error && u) user = u;
+            else if (error) console.warn('[consume_download_credit] getUser error:', error.message);
         }
 
         // ── Parse and validate request body ───────────────────────────────────
@@ -128,7 +129,10 @@ Deno.serve(async (req) => {
         };
 
         console.log('[consume_download_credit]', user?.email ?? guest_id, '→', result);
-        return json(result, result.ok ? 200 : 402);
+        // Always return 200 for business-logic responses so supabase-js puts the
+        // result in `data` (not `error`). The frontend reads data.ok / data.code.
+        // 4xx/5xx are reserved for unexpected/infrastructure errors only.
+        return json(result, 200);
 
     } catch (err) {
         console.error('[consume_download_credit] unhandled error:', err);
