@@ -74,7 +74,8 @@ initAuth(async (identity) => {
 
     // ── Reddit Pixel: upgrade to advanced matching + fire SignUp event ────────
     _rdtInit(identity.email, identity.userId);
-    _rdtTrack('SignUp');
+    // conversionId = stable per user → deduplicates across tabs / retries
+    _rdtTrack('SignUp', { conversionId: `signup_${identity.userId}` });
 
     try {
       const saved = await getPersistedFonts(identity.userId);
@@ -1704,6 +1705,12 @@ _shopModal.addEventListener('click', async (e) => {
       return;
     }
 
+    // ── Reddit Pixel: track AddToCart + generate a purchase conversionId ───────
+    // Store the ID in sessionStorage so Purchase can use the same one on return.
+    const purchaseConvId = 'purchase_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    sessionStorage.setItem('rdt_purchase_conv_id', purchaseConvId);
+    _rdtTrack('AddToCart', { conversionId: purchaseConvId });
+
     // Redirect to Stripe Checkout
     console.log('[shop] redirecting to Stripe:', data.url);
     window.location.href = data.url;
@@ -1747,16 +1754,17 @@ _shopModal.addEventListener('click', async (e) => {
 
         if (creditsAdded || unlimitedAdded) {
           clearInterval(poll);
+          // Match the conversionId to the AddToCart event fired before the Stripe redirect
+          const convId = sessionStorage.getItem('rdt_purchase_conv_id') || ('purchase_' + Date.now());
+          sessionStorage.removeItem('rdt_purchase_conv_id');
           if (unlimitedAdded) {
             showToast('✅ Unlimited access activated! Enjoy unlimited downloads.', 6000);
-            // Reddit Pixel: track unlimited purchase ($20)
-            _rdtTrack('Purchase', { value: 20, currency: 'USD' });
+            _rdtTrack('Purchase', { value: 20, currency: 'USD', conversionId: convId });
           } else {
             const added = balanceNow - balanceBefore;
             showToast(`✅ ${added} credits added! Balance: ${balanceNow}`, 6000);
-            // Reddit Pixel: map credit count to pack price
             const packPrice = added >= 50 ? 5 : added >= 20 ? 3 : 1;
-            _rdtTrack('Purchase', { value: packPrice, currency: 'USD' });
+            _rdtTrack('Purchase', { value: packPrice, currency: 'USD', conversionId: convId });
           }
           return;
         }
@@ -1765,8 +1773,10 @@ _shopModal.addEventListener('click', async (e) => {
       if (attempts >= MAX_ATTEMPTS) {
         clearInterval(poll);
         showToast("✅ Payment received! Please refresh if credits haven't appeared yet.", 6000);
-        // Reddit Pixel: fire best-effort Purchase (value unknown at this point)
-        _rdtTrack('Purchase', { currency: 'USD' });
+        // Best-effort: use stored conversionId if poll hit the limit before webhook arrived
+        const convIdFallback = sessionStorage.getItem('rdt_purchase_conv_id') || ('purchase_' + Date.now());
+        sessionStorage.removeItem('rdt_purchase_conv_id');
+        _rdtTrack('Purchase', { currency: 'USD', conversionId: convIdFallback });
       }
     }, INTERVAL_MS);
 
