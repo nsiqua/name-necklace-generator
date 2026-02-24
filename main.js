@@ -52,10 +52,30 @@ import { persistFont, getPersistedFonts } from './fontStorage.js';
 // so we don't re-restore on every credits-refresh event.
 let _restoredForUserId = null;
 
+// ── Reddit Pixel helper ───────────────────────────────────────────────────────
+function _rdtInit(email, userId) {
+  if (typeof rdt !== 'function') return;
+  try {
+    rdt('init', 'a2_igpkzcqz976k', {
+      email: email || undefined,
+      externalId: userId || undefined,
+    });
+  } catch (e) { /* ignore */ }
+}
+function _rdtTrack(event, data) {
+  if (typeof rdt !== 'function') return;
+  try { rdt('track', event, data); } catch (e) { /* ignore */ }
+}
+
 initAuth(async (identity) => {
   if (identity.type === 'user' && identity.userId && identity.userId !== _restoredForUserId) {
     // ── Logged-in user detected (first time or after account switch) ──
     _restoredForUserId = identity.userId;
+
+    // ── Reddit Pixel: upgrade to advanced matching + fire SignUp event ────────
+    _rdtInit(identity.email, identity.userId);
+    _rdtTrack('SignUp');
+
     try {
       const saved = await getPersistedFonts(identity.userId);
       for (const record of saved) {
@@ -71,7 +91,6 @@ initAuth(async (identity) => {
     // ── User signed out ── remove their persisted fonts from the selector
     _restoredForUserId = null;
     fontSelect.querySelectorAll('option[data-user-font]').forEach(opt => {
-      // If the about-to-be-removed font was active, fall back to Pacifico
       if (activeFontKey === opt.value) {
         activeFontKey = 'pacifico';
         fontSelect.value = 'pacifico';
@@ -1730,8 +1749,14 @@ _shopModal.addEventListener('click', async (e) => {
           clearInterval(poll);
           if (unlimitedAdded) {
             showToast('✅ Unlimited access activated! Enjoy unlimited downloads.', 6000);
+            // Reddit Pixel: track unlimited purchase ($20)
+            _rdtTrack('Purchase', { value: 20, currency: 'USD' });
           } else {
-            showToast(`✅ ${balanceNow - balanceBefore} credits added! Balance: ${balanceNow}`, 6000);
+            const added = balanceNow - balanceBefore;
+            showToast(`✅ ${added} credits added! Balance: ${balanceNow}`, 6000);
+            // Reddit Pixel: map credit count to pack price
+            const packPrice = added >= 50 ? 5 : added >= 20 ? 3 : 1;
+            _rdtTrack('Purchase', { value: packPrice, currency: 'USD' });
           }
           return;
         }
@@ -1740,6 +1765,8 @@ _shopModal.addEventListener('click', async (e) => {
       if (attempts >= MAX_ATTEMPTS) {
         clearInterval(poll);
         showToast("✅ Payment received! Please refresh if credits haven't appeared yet.", 6000);
+        // Reddit Pixel: fire best-effort Purchase (value unknown at this point)
+        _rdtTrack('Purchase', { currency: 'USD' });
       }
     }, INTERVAL_MS);
 
