@@ -621,3 +621,457 @@ input[type="text"]:focus {
     width: 100%;
   }
 }
+
+/* ============================================ */
+/* ACCOUNT WIDGET                               */
+/* ============================================ */
+.account-widget {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.account-email {
+  font-size: 0.9em;
+  color: #555;
+  font-weight: 500;
+}
+
+.credit-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-size: 0.8em;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+
+/* Shown in place of .credit-badge when credits = 0 and feedback bonus is exhausted */
+.buy-credits-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: linear-gradient(135deg, #f7971e 0%, #e55353 100%);
+  color: white;
+  font-size: 0.78em;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.15s;
+  white-space: nowrap;
+}
+
+.buy-credits-badge:hover {
+  opacity: 0.88;
+  transform: translateY(-1px);
+}
+
+.buy-credits-badge:active {
+  transform: translateY(0);
+}
+
+.auth-signout-btn {
+  background: linear-gradient(135deg, #e55353 0%, #c0392b 100%);
+}
+
+/* ============================================ */
+/* AUTH MODAL OVERLAY                           */
+/* ============================================ */
+.auth-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.auth-modal-box {
+  background: white;
+  border-radius: 20px;
+  padding: 36px 32px 32px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  position: relative;
+  animation: authFadeIn 0.2s ease;
+}
+
+@keyframes authFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.auth-modal-close {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  background: none;
+  border: none;
+  font-size: 1.4em;
+  color: #999;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  transition: color 0.2s, background 0.2s;
+}
+
+.auth-modal-close:hover {
+  color: #333;
+  background: #f0f0f0;
+}
+
+.auth-modal-title {
+  text-align: center;
+  font-size: 1.4em;
+  color: #333;
+  margin-bottom: 18px;
+}
+
+/* ============================================ */
+/* AUTH TABS                                    */
+/* ============================================ */
+.auth-tabs {
+  display: flex;
+  gap: 0;
+  border: 2px solid #667eea;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+
+.auth-tab {
+  flex: 1;
+  padding: 10px;
+  font-size: 0.95em;
+  font-weight: 600;
+  border: none;
+  background: white;
+  color: #667eea;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.auth-tab.active {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.auth-tab:not(.active):hover {
+  background: rgba(102, 126, 234, 0.08);
+}
+
+/* ============================================ */
+/* AUTH FORM                                    */
+/* ============================================ */
+#authForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+#authEmail,
+#authPassword {
+  width: 100%;
+  padding: 13px 15px;
+  font-size: 1em;
+  border: 2px solid #ddd;
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.3s;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+#authEmail:focus,
+#authPassword:focus {
+  border-color: #667eea;
+}
+
+/* ============================================ */
+/* AUTH ERROR BOX                               */
+/* ============================================ */
+.auth-error {
+  font-size: 0.88em;
+  color: #721c24;
+  background: #f8d7da;
+  border: 1px solid #dc3545;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  display: none;
+  line-height: 1.4;
+}
+
+.auth-error:not(:empty) {
+  display: block;
+}
+
+/* ============================================ */
+/* AUTH DIVIDER & GOOGLE BUTTON                 */
+/* ============================================ */
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0;
+  color: #bbb;
+  font-size: 0.85em;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e0e0e0;
+}
+
+.google-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+  font-size: 0.95em;
+  font-weight: 600;
+  color: #333;
+  background: white;
+  border: 2px solid #ddd;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.google-btn:hover:not(:disabled) {
+  border-color: #4285F4;
+  box-shadow: 0 2px 8px rgba(66, 133, 244, 0.2);
+}
+
+.google-btn:disabled,
+#authSubmitBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+@media (max-width: 480px) {
+  .auth-modal-box {
+    padding: 28px 20px 24px;
+  }
+}
+
+/* ============================================ */
+/* SESSION STATUS LINE                          */
+/* ============================================ */
+.session-status {
+  text-align: center;
+  font-size: 0.78em;
+  color: #888;
+  margin: -12px 0 14px;
+  letter-spacing: 0.01em;
+  transition: color 0.3s;
+}
+
+/* ============================================ */
+/* PAYWALL MODAL                                */
+/* ============================================ */
+.paywall-box {
+  max-width: 400px;
+  text-align: center;
+}
+
+.paywall-icon {
+  font-size: 2.5em;
+  margin-bottom: 10px;
+}
+
+.paywall-desc {
+  color: #555;
+  font-size: 0.95em;
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.paywall-sub {
+  font-size: 0.82em;
+  color: #999;
+  margin-top: 10px;
+}
+
+.paywall-feedback-btn {
+  display: block;
+  width: 100%;
+  text-decoration: none;
+  margin-bottom: 0;
+  text-align: center;
+}
+
+.paywall-buy-btn {
+  width: 100%;
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ============================================ */
+/* FEEDBACK CLAIM BUTTON                        */
+/* ============================================ */
+.feedback-claim-btn {
+  background: none;
+  border: none;
+  color: #667eea;
+  font-size: 0.78em;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.feedback-claim-btn:hover {
+  background: rgba(102, 126, 234, 0.12);
+  color: #4a5cc7;
+}
+
+/* ============================================ */
+/* TOAST NOTIFICATION                           */
+/* ============================================ */
+.credit-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: #323232;
+  color: #fff;
+  padding: 12px 20px;
+  border-radius: 10px;
+  font-size: 0.9em;
+  font-weight: 500;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+  z-index: 9999;
+  max-width: 300px;
+}
+
+.credit-toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* ============================================ */
+/* CREDITS SHOP MODAL                           */
+/* ============================================ */
+.shop-box {
+  max-width: 480px;
+}
+
+.pack-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.pack-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 18px 12px 14px;
+  border: 2px solid #e0e0e0;
+  border-radius: 14px;
+  background: #fafafa;
+  cursor: pointer;
+  transition: border-color 0.18s, box-shadow 0.18s, transform 0.1s;
+  font-family: inherit;
+}
+
+.pack-card:hover {
+  border-color: #667eea;
+  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.18);
+  transform: translateY(-2px);
+}
+
+.pack-card:active {
+  transform: translateY(0);
+}
+
+.pack-card:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.pack-badge {
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: white;
+  font-size: 0.68em;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.pack-popular {
+  border-color: #667eea;
+}
+
+.pack-unlimited {
+  background: linear-gradient(135deg, #fff9e6, #fff3cd);
+  border-color: #e6a817;
+}
+
+.pack-unlimited:hover {
+  border-color: #c8890f;
+  box-shadow: 0 4px 16px rgba(200, 137, 15, 0.2);
+}
+
+.pack-credits {
+  font-size: 2em;
+  font-weight: 800;
+  color: #333;
+  line-height: 1;
+}
+
+.pack-label {
+  font-size: 0.75em;
+  color: #777;
+  margin-bottom: 6px;
+}
+
+.pack-price {
+  font-size: 1.15em;
+  font-weight: 700;
+  color: #667eea;
+}
+
+.pack-unlimited .pack-price {
+  color: #c8890f;
+}

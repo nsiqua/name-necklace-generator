@@ -44,6 +44,62 @@ const makerjs = makerjsNS.default ?? makerjsNS;
 import opentype from 'opentype.js';
 import paper from 'paper';
 import ClipperLib from 'clipper-lib';
+import { initAuth, appState, refreshCredits } from './auth.js';
+import { supabase } from './supabaseClient.js';
+import { persistFont, getPersistedFonts } from './fontStorage.js';
+
+// Track which userId we have already restored fonts for,
+// so we don't re-restore on every credits-refresh event.
+let _restoredForUserId = null;
+
+initAuth(async (identity) => {
+  if (identity.type === 'user' && identity.userId && identity.userId !== _restoredForUserId) {
+    // ── Logged-in user detected (first time or after account switch) ──
+    _restoredForUserId = identity.userId;
+    try {
+      const saved = await getPersistedFonts(identity.userId);
+      for (const record of saved) {
+        _addFontOptionFromBuffer(record.fontName, record.buffer, { userFont: true });
+      }
+      if (saved.length > 0) {
+        console.log(`[fonts] Restored ${saved.length} persisted font(s) for user ${identity.userId.slice(-6)}.`);
+      }
+    } catch (err) {
+      console.warn('[fonts] Could not restore persisted fonts:', err);
+    }
+  } else if (identity.type === 'guest' && _restoredForUserId !== null) {
+    // ── User signed out ── remove their persisted fonts from the selector
+    _restoredForUserId = null;
+    fontSelect.querySelectorAll('option[data-user-font]').forEach(opt => {
+      // If the about-to-be-removed font was active, fall back to Pacifico
+      if (activeFontKey === opt.value) {
+        activeFontKey = 'pacifico';
+        fontSelect.value = 'pacifico';
+      }
+      customFontsById.delete(opt.value);
+      opt.remove();
+    });
+  }
+});
+
+// ── Dev helper (DEV builds only) ──────────────────────────────────────────────
+// Usage in console:
+//   window.__auth.getState()
+//   await window.__auth.refreshCredits()
+//   await window.__auth.supabase.auth.getSession()
+if (import.meta.env.DEV) {
+  import('./supabaseClient.js').then(({ supabase }) => {
+    window.__auth = {
+      supabase,
+      getState: () => ({ ...appState }),
+      refreshCredits: () => refreshCredits(),
+    };
+    console.log('[dev] 🛠️  window.__auth available.',
+      '\n  window.__auth.getState()         → current identity + credits',
+      '\n  await window.__auth.refreshCredits() → re-fetch from edge function');
+  });
+}
+
 
 // Get DOM elements
 const nameInput = document.getElementById('nameInput');
@@ -169,6 +225,49 @@ function getActiveFont() {
   }
   // Fallback to Pacifico if something went wrong
   return fonts.pacifico;
+}
+
+/**
+ * Parse a raw ArrayBuffer as a font, register it in customFontsById,
+ * and add an <option> to the font selector.
+ *
+ * @param {string}      fontName - Display name for the selector
+ * @param {ArrayBuffer} buffer   - Raw TTF/OTF bytes
+ * @param {object}      [opts]
+ * @param {boolean}     [opts.userFont=false]  - Mark option as data-user-font (persisted/owned by logged-in user)
+ * @param {boolean}     [opts.switchTo=false]  - Immediately activate the font and regenerate preview
+ * @returns {string|null} The assigned fontId, or null on parse failure
+ */
+function _addFontOptionFromBuffer(fontName, buffer, { userFont = false, switchTo = false } = {}) {
+  try {
+    const fontObject = opentype.parse(buffer);
+    customFontCounter++;
+    const fontId = `custom:${customFontCounter}`;
+    customFontsById.set(fontId, fontObject);
+
+    const uploadOption = fontSelect.querySelector('option[value="custom_upload"]');
+    const newOption = document.createElement('option');
+    newOption.value = fontId;
+    newOption.textContent = fontName;
+    if (userFont) newOption.dataset.userFont = 'true';
+
+    if (uploadOption) {
+      fontSelect.insertBefore(newOption, uploadOption);
+    } else {
+      fontSelect.appendChild(newOption);
+    }
+
+    if (switchTo) {
+      activeFontKey = fontId;
+      fontSelect.value = fontId;
+      generatePreview();
+    }
+
+    return fontId;
+  } catch (err) {
+    console.warn(`[fonts] Could not parse font "${fontName}":`, err);
+    return null;
+  }
 }
 
 // ============================================
@@ -399,55 +498,36 @@ fontUpload.addEventListener('change', async (e) => {
     // Read file as ArrayBuffer
     const arrayBuffer = await file.arrayBuffer();
 
-    // Parse with OpenType.js
-    const fontObject = opentype.parse(arrayBuffer);
-
-    // Get font display name
+    // Resolve display name from font metadata, falling back to filename
     let fontName = 'Custom Font';
-    if (fontObject.names.fullName && fontObject.names.fullName.en) {
-      fontName = fontObject.names.fullName.en;
-    } else if (fontObject.names.fontFamily && fontObject.names.fontFamily.en) {
-      fontName = fontObject.names.fontFamily.en;
-    } else {
-      // Fallback to filename without extension
-      fontName = file.name.replace(/\.(ttf|otf)$/i, '');
+    {
+      const tempFont = opentype.parse(arrayBuffer);
+      if (tempFont.names.fullName?.en) fontName = tempFont.names.fullName.en;
+      else if (tempFont.names.fontFamily?.en) fontName = tempFont.names.fontFamily.en;
+      else fontName = file.name.replace(/\.(ttf|otf)$/i, '');
     }
 
-    // Generate unique ID for this custom font
-    customFontCounter++;
-    const fontId = `custom:${customFontCounter}`;
+    // Register + add to selector (marks as data-user-font if logged in, and auto-switches)
+    const isLoggedIn = appState.type === 'user' && !!appState.userId;
+    const fontId = _addFontOptionFromBuffer(fontName, arrayBuffer, {
+      userFont: isLoggedIn,
+      switchTo: true,
+    });
 
-    // Store the font in the Map
-    customFontsById.set(fontId, fontObject);
+    if (!fontId) throw new Error('Font could not be parsed.');
 
-    // Find the upload option (should be last)
-    const uploadOption = fontSelect.querySelector('option[value="custom_upload"]');
-
-    // Create new option for this font
-    const newOption = document.createElement('option');
-    newOption.value = fontId;
-    newOption.textContent = fontName;
-
-    // Insert before the upload option (so upload stays at bottom)
-    if (uploadOption) {
-      fontSelect.insertBefore(newOption, uploadOption);
-    } else {
-      // Fallback: just append it
-      fontSelect.appendChild(newOption);
+    // ── Persist for logged-in users ──────────────────────────────────────────
+    if (isLoggedIn) {
+      persistFont(appState.userId, fontId, fontName, arrayBuffer)
+        .then(() => console.log(`[fonts] Persisted "${fontName}" for user ${appState.userId.slice(-6)}.`))
+        .catch(err => console.warn('[fonts] Could not persist font:', err));
     }
-
-    // Switch to the newly uploaded font
-    activeFontKey = fontId;
-    fontSelect.value = fontId;
 
     // Update status bar
     statusBar.className = 'status-bar success';
     statusText.textContent = `✓ Custom font "${fontName}" loaded successfully!`;
 
-    // Regenerate preview with new font
-    generatePreview();
-
-    console.log(`✓ Custom font loaded: ${fontName} (ID: ${fontId})`, fontObject);
+    console.log(`✓ Custom font loaded: ${fontName} (ID: ${fontId})`);
 
     // Clear the file input so same file can be uploaded again if needed
     e.target.value = '';
@@ -456,10 +536,6 @@ fontUpload.addEventListener('change', async (e) => {
     console.error('Custom font loading error:', error);
     statusBar.className = 'status-bar error';
     statusText.textContent = `Error loading font: ${error.message}`;
-
-    // Selection already reverted in change handler above
-
-    // Clear the file input
     e.target.value = '';
   }
 });
@@ -1366,12 +1442,449 @@ function autoFitViewBox() {
 }
 
 // Download file based on selected format
-downloadBtn.addEventListener('click', () => {
+// ── Paywall modal wiring ──────────────────────────────────────────────────────
+// (DOM is ready by the time this module executes)
+const _paywallModal = document.getElementById('paywallModal');
+const _paywallClose = document.getElementById('paywallClose');
+const _paywallGuest = document.getElementById('paywallGuest');
+const _paywallUser = document.getElementById('paywallUser');
+const _paywallAlreadyClaimed = document.getElementById('paywallAlreadyClaimed');
+const _paywallSignIn = document.getElementById('paywallSignIn');
+const _paywallAlreadyClaimedBuy = document.getElementById('paywallAlreadyClaimedBuy');
+
+// variant: 'guest' | 'user' | 'already_claimed'
+function _showPaywall(variant) {
+  _paywallGuest.style.display = variant === 'guest' ? '' : 'none';
+  _paywallUser.style.display = variant === 'user' ? '' : 'none';
+  _paywallAlreadyClaimed.style.display = variant === 'already_claimed' ? '' : 'none';
+  _paywallModal.style.display = 'flex';
+}
+
+function _hidePaywall() {
+  _paywallModal.style.display = 'none';
+}
+
+_paywallClose.addEventListener('click', _hidePaywall);
+_paywallModal.addEventListener('click', e => { if (e.target === _paywallModal) _hidePaywall(); });
+
+// "Sign in / Create account" in the guest paywall — open the auth modal
+_paywallSignIn.addEventListener('click', () => {
+  _hidePaywall();
+  document.getElementById('authBtn').click(); // reuse existing auth modal trigger
+});
+
+// "Buy credits" in the already-claimed paywall — open the shop modal
+_paywallAlreadyClaimedBuy.addEventListener('click', () => {
+  _hidePaywall();
+  _openShop();
+});
+
+// "Buy Credits" badge-button in the account widget header
+// Appears when credits === 0 and feedback bonus is exhausted.
+// Routes to the correct paywall variant based on identity type.
+const _headerBuyCreditsBtn = document.getElementById('buyCreditsBtn');
+if (_headerBuyCreditsBtn) {
+  _headerBuyCreditsBtn.addEventListener('click', () => {
+    if (appState.type === 'guest') {
+      // Guest: prompt them to create a free account for 10 credits
+      _showPaywall('guest');
+    } else {
+      // Logged-in user who has already claimed feedback: go straight to shop
+      _showPaywall('already_claimed');
+    }
+  });
+}
+
+// ── Toast helper ──────────────────────────────────────────────────────────────
+const _toast = document.getElementById('creditToast');
+let _toastTimer = null;
+
+function showToast(message, durationMs = 4000) {
+  _toast.textContent = message;
+  _toast.classList.add('visible');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => {
+    _toast.classList.remove('visible');
+  }, durationMs);
+}
+
+// ── Feedback bonus wiring ─────────────────────────────────────────────────────
+const FEEDBACK_LS_KEY = 'feedback_started_at';
+const FEEDBACK_CLAIMED_KEY = 'feedback_claimed_ever'; // set after any successful claim (guest or user) for cross-identity dupe detection
+const FEEDBACK_DELAY_MS = 30_000; // must wait 30s before claiming
+
+const _feedbackLink = document.getElementById('feedbackLink');
+const _feedbackClaimBtn = document.getElementById('feedbackClaimBtn');
+let _feedbackRevealTimer = null;
+
+/** Save timestamp when user clicks the feedback link. */
+_feedbackLink.addEventListener('click', () => {
+  localStorage.setItem(FEEDBACK_LS_KEY, String(Date.now()));
+  console.log('[feedback] link clicked — feedback_started_at saved');
+  _scheduleFeedbackReveal();
+});
+
+// Also intercept the feedback link inside the paywall modal (same behaviour)
+const _paywallFeedbackLink = document.getElementById('paywallFeedbackLink');
+if (_paywallFeedbackLink) {
+  _paywallFeedbackLink.addEventListener('click', () => {
+    localStorage.setItem(FEEDBACK_LS_KEY, String(Date.now()));
+    console.log('[feedback] paywall feedback link clicked — feedback_started_at saved');
+    _scheduleFeedbackReveal();
+    _hidePaywall(); // close the modal so user can see the claim button later
+  });
+}
+
+/** Show/hide claim button based on localStorage + 30s elapsed. */
+function showClaimBtnIfEligible() {
+  const ts = Number(localStorage.getItem(FEEDBACK_LS_KEY) ?? 0);
+  if (!ts) {
+    _feedbackClaimBtn.style.display = 'none';
+    return;
+  }
+  const elapsed = Date.now() - ts;
+  if (elapsed >= FEEDBACK_DELAY_MS) {
+    _feedbackClaimBtn.style.display = '';  // show immediately
+  } else {
+    _feedbackClaimBtn.style.display = 'none';
+    _scheduleFeedbackReveal(FEEDBACK_DELAY_MS - elapsed);
+  }
+}
+
+function _scheduleFeedbackReveal(remainingMs) {
+  clearTimeout(_feedbackRevealTimer);
+  const delay = remainingMs ?? FEEDBACK_DELAY_MS;
+  _feedbackRevealTimer = setTimeout(() => {
+    showClaimBtnIfEligible();
+  }, delay);
+}
+
+/** Handle claim button click. */
+_feedbackClaimBtn.addEventListener('click', async () => {
+  _feedbackClaimBtn.disabled = true;
+  _feedbackClaimBtn.textContent = 'Claiming…';
+
+  try {
+    const isGuest = appState.type === 'guest';
+
+    // If a logged-in user previously claimed as a guest (same device/browser),
+    // skip the EF call and show the already-claimed popup with a buy button.
+    if (!isGuest && localStorage.getItem(FEEDBACK_CLAIMED_KEY)) {
+      localStorage.removeItem(FEEDBACK_LS_KEY);
+      _feedbackClaimBtn.style.display = 'none';
+      _showPaywall('already_claimed');
+      return;
+    }
+
+    const { data, error } = await supabase.functions.invoke('claim_feedback_bonus', {
+      body: { guest_id: isGuest ? appState.guestId : undefined },
+    });
+
+    if (error) {
+      console.warn('[feedback] invoke error:', error.message);
+      showToast('⚠️ Could not claim credits — please try again.');
+      return;
+    }
+
+    if (data?.ok) {
+      localStorage.removeItem(FEEDBACK_LS_KEY);
+      _feedbackClaimBtn.style.display = 'none';
+      // Mark as claimed so logged-in session on same device sees "already claimed"
+      localStorage.setItem(FEEDBACK_CLAIMED_KEY, '1');
+      showToast('🎉 +5 credits added — thanks for your feedback!');
+      console.log('[analytics] feedback_awarded', { identity: isGuest ? appState.guestId : appState.userId });
+      refreshCredits().catch(() => { });
+    } else if (data?.code === 'ALREADY_GRANTED') {
+      localStorage.removeItem(FEEDBACK_LS_KEY);
+      _feedbackClaimBtn.style.display = 'none';
+      // Show the popup with a buy-credits button instead of just a toast
+      _showPaywall('already_claimed');
+    } else if (data?.code === 'UNAUTHENTICATED') {
+      showToast('⚠️ Please sign in or wait for your session to load, then try again.');
+    } else {
+      console.warn('[feedback] unexpected response:', data);
+      showToast('⚠️ Something went wrong — please try again.');
+    }
+  } catch (err) {
+    console.error('[feedback] claim threw:', err.message);
+    showToast('⚠️ Could not claim credits — please try again.');
+  } finally {
+    _feedbackClaimBtn.disabled = false;
+    _feedbackClaimBtn.textContent = 'Claim +5 feedback credits';
+  }
+});
+
+// Check on page load (in case user clicked the link in a prior session)
+showClaimBtnIfEligible();
+
+// ── Credits shop modal ────────────────────────────────────────────────────────
+const _shopModal = document.getElementById('shopModal');
+const _shopClose = document.getElementById('shopClose');
+const _paywallBuy = document.getElementById('paywallBuy');
+
+function _openShop() {
+  _shopModal.style.display = 'flex';
+}
+function _closeShop() {
+  _shopModal.style.display = 'none';
+}
+
+_shopClose.addEventListener('click', _closeShop);
+_shopModal.addEventListener('click', e => { if (e.target === _shopModal) _closeShop(); });
+
+// "Buy credits" in paywall (registered-user variant) → open shop
+_paywallBuy.addEventListener('click', () => {
+  _hidePaywall();
+  _openShop();
+});
+
+// Pack card clicks → call create_checkout_session → redirect to Stripe
+_shopModal.addEventListener('click', async (e) => {
+  const card = e.target.closest('[data-pack]');
+  if (!card || card.disabled) return;
+
+  const pack = card.dataset.pack;
+  const originalLabel = card.textContent;
+  console.log('[analytics] purchase_started', { pack, identity: appState.type === 'guest' ? appState.guestId : appState.userId });
+
+  // Disable all cards while calling the EF
+  const allCards = [..._shopModal.querySelectorAll('.pack-card')];
+  allCards.forEach(c => { c.disabled = true; c.style.opacity = '0.6'; });
+  card.textContent = 'Redirecting…';
+
+  const restoreCards = () => {
+    allCards.forEach(c => { c.disabled = false; c.style.opacity = ''; });
+    card.textContent = originalLabel;
+  };
+
+  try {
+    const isGuest = appState.type === 'guest';
+    const { data, error } = await supabase.functions.invoke('create_checkout_session', {
+      body: { pack, guest_id: isGuest ? appState.guestId : undefined },
+    });
+
+    // supabase-js puts non-2xx EF responses into `error` — try to extract body
+    if (error) {
+      let errMsg = error.message;
+      try {
+        const errBody = await error?.context?.json?.();
+        if (errBody?.message) errMsg = errBody.message;
+        if (errBody?.code) errMsg = `${errBody.code}: ${errMsg}`;
+      } catch { /* ignore */ }
+      console.error('[shop] checkout session error (invoke):', errMsg);
+      showToast(`⚠️ Could not start checkout — ${errMsg}`);
+      restoreCards();
+      return;
+    }
+
+    if (!data?.url) {
+      const msg = data?.message ?? data?.code ?? 'No checkout URL returned';
+      console.error('[shop] checkout session error (no url):', data);
+      showToast(`⚠️ Could not start checkout — ${msg}`);
+      restoreCards();
+      return;
+    }
+
+    // Redirect to Stripe Checkout
+    console.log('[shop] redirecting to Stripe:', data.url);
+    window.location.href = data.url;
+
+  } catch (err) {
+    console.error('[shop] unexpected error:', err.message);
+    showToast('⚠️ Could not start checkout — please try again.');
+    restoreCards();
+  }
+});
+
+
+// ── Handle return from Stripe Checkout (URL params) ───────────────────────────
+(function handleStripeReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const payment = params.get('payment');
+
+  if (payment === 'success') {
+    // Clean URL immediately so user doesn't see raw params
+    const clean = window.location.pathname + window.location.hash;
+    history.replaceState(null, '', clean);
+
+    showToast('🎉 Payment successful — loading your credits…', 4000);
+
+    // The Stripe webhook is async: it may arrive 1-10 seconds after the user lands here.
+    // Poll refreshCredits until the balance increases (up to ~12 seconds).
+    const balanceBefore = appState.credits_balance ?? 0;
+    const unlimitedBefore = appState.unlimited_until;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 8;
+    const INTERVAL_MS = 1500;
+
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        await refreshCredits();
+        const balanceNow = appState.credits_balance ?? 0;
+        const unlimitedNow = appState.unlimited_until;
+        const creditsAdded = balanceNow > balanceBefore;
+        const unlimitedAdded = unlimitedNow && (!unlimitedBefore || unlimitedNow !== unlimitedBefore);
+
+        if (creditsAdded || unlimitedAdded) {
+          clearInterval(poll);
+          if (unlimitedAdded) {
+            showToast('✅ Unlimited access activated! Enjoy unlimited downloads.', 6000);
+          } else {
+            showToast(`✅ ${balanceNow - balanceBefore} credits added! Balance: ${balanceNow}`, 6000);
+          }
+          return;
+        }
+      } catch { /* ignore individual poll errors */ }
+
+      if (attempts >= MAX_ATTEMPTS) {
+        clearInterval(poll);
+        showToast("✅ Payment received! Please refresh if credits haven't appeared yet.", 6000);
+      }
+    }, INTERVAL_MS);
+
+  } else if (payment === 'cancelled') {
+    showToast('Payment cancelled — no charge made.', 4000);
+    const clean = window.location.pathname + window.location.hash;
+    history.replaceState(null, '', clean);
+  }
+})();
+
+
+// ── requestDownloadPermission ─────────────────────────────────────────────────
+/**
+ * Call consume_download_credit Edge Function before every download.
+ *
+ * Returns true  → credit consumed (or unlimited), caller may proceed.
+ * Returns false → no credits or error, caller must abort; paywall already shown.
+ *
+ * @param {string} format  'svg' | 'png' | 'pdf' | 'dxf'
+ * @returns {Promise<boolean>}
+ */
+async function requestDownloadPermission(format) {
+  const isGuest = appState.type === 'guest';
+  const identity = isGuest ? appState.guestId : appState.userId;
+
+  // ── Guard: identity must be resolved ─────────────────────────────────────
+  if (!identity) {
+    console.warn('[credits] no identity yet — blocking');
+    _showPaywall(isGuest ? 'guest' : 'user');
+    return false;
+  }
+
+  // ── LOCAL PRE-CHECK: use the last-known server balance as a fast gate ─────
+  // appState is refreshed from the server after every successful download, so
+  // credits_balance here always reflects real server state.
+  // If we KNOW they're at 0 (and no unlimited pass), skip the EF call and
+  // block immediately.  This is the primary guard against bypasses.
+  const hasUnlimited = appState.unlimited_until
+    && new Date(appState.unlimited_until) > new Date();
+
+  if (!hasUnlimited && appState.credits_balance !== null && appState.credits_balance <= 0) {
+    console.log('[analytics] download_blocked', { format, identity, reason: 'local_zero_credits', isGuest });
+    _showPaywall(isGuest ? 'guest' : 'user');
+    return false;
+  }
+
+  // ── Remote check: consume_download_credit Edge Function ──────────────────
+  // We only reach here when appState says credits are available (or unknown).
+  // The EF is the authoritative transaction; it debits the credit atomically.
+  let data, error;
+  try {
+    ({ data, error } = await supabase.functions.invoke('consume_download_credit', {
+      body: {
+        format,
+        guest_id: isGuest ? appState.guestId : undefined,
+      },
+    }));
+  } catch (err) {
+    console.warn('[credits] invoke threw:', err.message);
+    // We thought they had credits (pre-check passed), but EF is unreachable.
+    // Block and ask them to retry — don't silently allow.
+    console.log('[analytics] download_blocked', { format, identity, reason: 'invoke_exception' });
+    showToast('⚠️ Could not reach the server — please try again in a moment.');
+    return false;
+  }
+
+  // ── Defensive: supabase-js puts non-2xx EF responses into `error` ────────
+  if (error) {
+    console.warn('[credits] invoke error:', error.message, error);
+
+    let errCode;
+    try {
+      const errBody = await error?.context?.json?.();
+      errCode = errBody?.code;
+    } catch { /* ignore */ }
+
+    if (errCode === 'NO_CREDITS') {
+      // Server confirmed no credits — show paywall
+      console.log('[analytics] download_blocked', { format, identity, reason: 'NO_CREDITS_in_error_body', isGuest });
+      // Also update local balance so next click hits the fast path
+      appState.credits_balance = 0;
+      _showPaywall(isGuest ? 'guest' : 'user');
+      return false;
+    }
+
+    // Genuine infra error — block with retry prompt
+    console.log('[analytics] download_blocked', { format, identity, reason: `invoke_error:${errCode ?? error.message}` });
+    showToast('⚠️ Could not verify credits — please try again.');
+    return false;
+  }
+
+  // ── Server explicitly grants the download ────────────────────────────────
+  if (data?.ok) {
+    console.log('[analytics] download_allowed', { format, identity, reason: data.reason ?? 'ok', credits_balance: data.credits_balance });
+    // Update local balance so the next fast-path check is correct
+    if (typeof data.credits_balance === 'number') appState.credits_balance = data.credits_balance;
+    refreshCredits().catch(() => { });
+    return true;
+  }
+
+  // ── Server says no credits ────────────────────────────────────────────────
+  if (data?.code === 'NO_CREDITS') {
+    console.log('[analytics] download_blocked', { format, identity, reason: 'NO_CREDITS', isGuest });
+    appState.credits_balance = 0; // update fast-path for next click
+    _showPaywall(isGuest ? 'guest' : 'user');
+    return false;
+  }
+
+  // ── Session not found ─────────────────────────────────────────────────────
+  if (data?.code === 'NOT_FOUND') {
+    console.warn('[credits] identity not found in DB:', identity);
+    console.log('[analytics] download_blocked', { format, identity, reason: 'NOT_FOUND' });
+    _showPaywall(isGuest ? 'guest' : 'user');
+    return false;
+  }
+
+  // ── Server-side DB / internal error ──────────────────────────────────────
+  if (data?.code === 'DB_ERROR' || data?.code === 'INTERNAL_ERROR') {
+    console.warn('[credits] server error:', data?.code, data?.message);
+    console.log('[analytics] download_blocked', { format, identity, reason: data?.code });
+    showToast('⚠️ Server error — please try again in a moment.');
+    return false;
+  }
+
+  // ── Catch-all: anything unexpected → block ────────────────────────────────
+  console.warn('[credits] unexpected response — blocking:', data);
+  console.log('[analytics] download_blocked', { format, identity, reason: 'unexpected' });
+  showToast('⚠️ Could not verify credits — please try again.');
+  return false;
+}
+
+
+
+// ── Download button handler (async) ──────────────────────────────────────────
+downloadBtn.addEventListener('click', async () => {
   const name = nameInput.value.trim();
   if (!name || !getActiveFont()) return;
 
   const selectedFormat = formatSelect.value;
 
+  // Gate on credits — returns false and shows paywall if no credits left
+  const allowed = await requestDownloadPermission(selectedFormat);
+  if (!allowed) return;
+
+  // Existing download logic — completely unchanged
   if (selectedFormat === 'png') {
     downloadPNG();
   } else if (selectedFormat === 'pdf') {
@@ -1382,6 +1895,7 @@ downloadBtn.addEventListener('click', () => {
     downloadSVG();
   }
 });
+
 
 // Download SVG function
 function downloadSVG() {

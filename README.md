@@ -2,7 +2,38 @@
 
 A simple web app that converts text in Pacifico font to laser-cut friendly SVG files for stainless steel name necklaces.
 
+## 🗄️ Supabase Setup (Required for Auth & Guest Tracking)
+
+### 1. Create the `guest_sessions` table
+
+Run the SQL in **[supabase/sql/guest_sessions.sql](supabase/sql/guest_sessions.sql)** in your Supabase project:
+
+**Supabase Dashboard → SQL Editor → New Query → paste & run**
+
+The file creates:
+- `guest_sessions` table (`guest_id` TEXT PK, `credits_balance` INT default 3, `unlimited_until`, `last_seen`, `created_at`)
+- Row Level Security policies (permissive for development)
+
+### 2. Environment Variables
+
+Copy `.env.example` → `.env` and fill in your values:
+```
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key
+```
+
+### 3. Local Testing Guide
+
+1. `npm run dev` → open http://localhost:5173
+2. Open DevTools console — you should see `[dev] 🛠️  window.__auth available`
+3. Confirm guest tracking: `await window.__auth.supabase.from('guest_sessions').select('*')`
+4. Sign up / log in via the "Sign in" button
+5. Confirm session: `await window.__auth.supabase.auth.getSession()`
+6. Sign out → confirm: `(await window.__auth.supabase.auth.getSession()).data.session === null`
+7. Check the **Session status line** below the account widget updates correctly
+
 ## 🚀 Quick Setup Guide
+
 
 ### Step 1: Install Node.js
 
