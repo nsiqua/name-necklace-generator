@@ -63,8 +63,8 @@ Deno.serve(async (req) => {
             else if (error) console.warn('[create_checkout_session] getUser error:', error.message);
         }
 
-        const body: { pack?: string; guest_id?: string } = await req.json().catch(() => ({}));
-        const { pack, guest_id } = body;
+        const body: { pack?: string; guest_id?: string; conversion_id?: string; click_id?: string } = await req.json().catch(() => ({}));
+        const { pack, guest_id, conversion_id, click_id } = body;
 
         // Validate pack
         if (!pack || !PACKS[pack]) {
@@ -126,6 +126,8 @@ Deno.serve(async (req) => {
                 pack,
                 ...(userId ? { user_id: userId } : {}),
                 ...(guest_id ? { guest_id: guest_id } : {}),
+                ...(conversion_id ? { conversion_id } : {}),
+                ...(click_id ? { click_id } : {}),
             },
             success_url: `${successUrl}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: cancelUrl,

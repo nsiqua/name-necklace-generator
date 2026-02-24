@@ -16,6 +16,67 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import Stripe from 'https://esm.sh/stripe@15?target=deno';
 
+// ── Reddit CAPI helper ────────────────────────────────────────────────────────
+async function sendRedditCAPIEvent(opts: {
+    tracking_type: string;
+    value_decimal?: string;
+    currency?: string;
+    conversion_id?: string;
+    click_id?: string;
+    email?: string;
+    external_id?: string;
+    test_id?: string;
+}) {
+    const token = Deno.env.get('REDDIT_ACCESS_TOKEN');
+    if (!token) {
+        console.warn('[reddit_capi] REDDIT_ACCESS_TOKEN not set — skipping');
+        return;
+    }
+    const event: Record<string, unknown> = {
+        event_at: Date.now(),
+        action_source: 'WEBSITE',   // must be uppercase
+        type: { tracking_type: opts.tracking_type },
+    };
+    if (opts.value_decimal || opts.currency || opts.conversion_id) {
+        const meta: Record<string, string> = {};
+        if (opts.value_decimal) meta.value_decimal = opts.value_decimal;
+        if (opts.currency) meta.currency = opts.currency;
+        if (opts.conversion_id) meta.conversion_id = opts.conversion_id;
+        event.metadata = meta;
+    }
+    if (opts.email || opts.external_id) {
+        const user: Record<string, string> = {};
+        if (opts.email) user.email = opts.email;
+        if (opts.external_id) user.external_id = opts.external_id;
+        if (opts.click_id) user.click_id = opts.click_id;
+        event.user = user;
+    }
+    // test_id goes at the data level, not inside the event
+    const payload: Record<string, unknown> = { events: [event] };
+    if (opts.test_id) payload.test_id = opts.test_id;
+    try {
+        const res = await fetch(
+            'https://ads-api.reddit.com/api/v3/pixels/a2_igpkzcqz976k/conversion_events',
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ data: payload }),
+            }
+        );
+        if (!res.ok) {
+            const text = await res.text();
+            console.warn('[reddit_capi] non-OK response:', res.status, text);
+        } else {
+            console.log('[reddit_capi] ✅ sent', opts.tracking_type);
+        }
+    } catch (err) {
+        console.warn('[reddit_capi] fetch error:', (err as Error).message);
+    }
+}
+
 // ── Pack definitions ──────────────────────────────────────────────────────────
 const PACK_MAP: Record<string, { credits: number; amountCents: number }> = {
     p1: { credits: 5, amountCents: 100 },
@@ -211,6 +272,33 @@ Deno.serve(async (req) => {
     console.log('[stripe_webhook] fulfilled:', {
         session_id: session.id, pack, user_id, guest_id,
         credits: packDef.credits, unlimited_until: unlimitedUntil,
+    });
+
+    // ── 7. Reddit Conversions API — Purchase event ───────────────────────────
+    // Fire server-side after DB fulfillment so it's reliable even with ad-blockers.
+    // Failure is non-fatal — we always return 200 to Stripe.
+    const { conversion_id, click_id } = session.metadata ?? {};
+    const valueDollars = (packDef.amountCents / 100).toFixed(2);
+    // Look up user email from Supabase if we have a user_id (best-effort for advanced matching)
+    let userEmail: string | undefined;
+    if (user_id) {
+        try {
+            const { data: profile } = await db
+                .from('profiles')
+                .select('email')
+                .eq('user_id', user_id)
+                .maybeSingle();
+            userEmail = profile?.email ?? undefined;
+        } catch { /* non-fatal */ }
+    }
+    await sendRedditCAPIEvent({
+        tracking_type: 'PURCHASE',
+        value_decimal: valueDollars,
+        currency: 'USD',
+        ...(conversion_id ? { conversion_id } : {}),
+        ...(click_id ? { click_id } : {}),
+        ...(userEmail ? { email: userEmail } : {}),
+        ...(user_id ? { external_id: user_id } : {}),
     });
 
     return json({ received: true, fulfilled: true });
