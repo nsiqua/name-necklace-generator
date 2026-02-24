@@ -3,6 +3,15 @@ import * as makerjsNS from 'makerjs';
 // Normalize CommonJS/ESM interop
 const makerjs = makerjsNS.default ?? makerjsNS;
 
+// ── Reddit click ID capture ───────────────────────────────────────────────────
+// When a user arrives from a Reddit ad, Reddit appends ?rdt_cid=XXXX to the URL.
+// We capture it once on page load and store in sessionStorage so it can be
+// forwarded to the CAPI Purchase event for improved attribution.
+(function captureRedditClickId() {
+  const rdtCid = new URLSearchParams(window.location.search).get('rdt_cid');
+  if (rdtCid) sessionStorage.setItem('rdt_cid', rdtCid);
+})();
+
 /**
  * Name Necklace SVG Generator - v2.1 (Auto-connect fix applied)
  * 
@@ -1679,8 +1688,16 @@ _shopModal.addEventListener('click', async (e) => {
 
   try {
     const isGuest = appState.type === 'guest';
+    // Generate a unique conversion ID before checkout so it threads through:
+    // browser pixel AddToCart → Stripe metadata → CAPI Purchase (all same ID)
+    const purchaseConvId = 'purchase_' + Date.now() + '_' + Math.random().toString(36).slice(2);
     const { data, error } = await supabase.functions.invoke('create_checkout_session', {
-      body: { pack, guest_id: isGuest ? appState.guestId : undefined },
+      body: {
+        pack,
+        guest_id: isGuest ? appState.guestId : undefined,
+        conversion_id: purchaseConvId,
+        click_id: sessionStorage.getItem('rdt_cid') || undefined,
+      },
     });
 
     // supabase-js puts non-2xx EF responses into `error` — try to extract body
@@ -1705,9 +1722,8 @@ _shopModal.addEventListener('click', async (e) => {
       return;
     }
 
-    // ── Reddit Pixel: track AddToCart + generate a purchase conversionId ───────
-    // Store the ID in sessionStorage so Purchase can use the same one on return.
-    const purchaseConvId = 'purchase_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    // ── Reddit Pixel: track AddToCart using the conversionId already generated above ──
+    // Also store it in sessionStorage so the Purchase event on return can match it.
     sessionStorage.setItem('rdt_purchase_conv_id', purchaseConvId);
     _rdtTrack('AddToCart', { conversionId: purchaseConvId });
 
