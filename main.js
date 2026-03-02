@@ -76,6 +76,21 @@ function _rdtTrack(event, data) {
   try { rdt('track', event, data); } catch (e) { /* ignore */ }
 }
 
+// ── Meta Pixel helper ────────────────────────────────────────────────────
+function _fbqInit(email, userId) {
+  if (typeof fbq !== 'function') return;
+  try {
+    fbq('init', '929405449761421', {
+      em: email || undefined,       // Meta hashes this automatically
+      external_id: userId || undefined,
+    });
+  } catch (e) { /* ignore */ }
+}
+function _fbqTrack(event, data) {
+  if (typeof fbq !== 'function') return;
+  try { fbq('track', event, data || {}); } catch (e) { /* ignore */ }
+}
+
 initAuth(async (identity) => {
   if (identity.type === 'user' && identity.userId && identity.userId !== _restoredForUserId) {
     // ── Logged-in user detected (first time or after account switch) ──
@@ -85,6 +100,9 @@ initAuth(async (identity) => {
     _rdtInit(identity.email, identity.userId);
     // conversionId = stable per user → deduplicates across tabs / retries
     _rdtTrack('SignUp', { conversionId: `signup_${identity.userId}` });
+    // ── Meta Pixel: advanced matching + CompleteRegistration ────────────────
+    _fbqInit(identity.email, identity.userId);
+    _fbqTrack('CompleteRegistration');
 
     try {
       const saved = await getPersistedFonts(identity.userId);
@@ -1726,6 +1744,7 @@ _shopModal.addEventListener('click', async (e) => {
     // Also store it in sessionStorage so the Purchase event on return can match it.
     sessionStorage.setItem('rdt_purchase_conv_id', purchaseConvId);
     _rdtTrack('AddToCart', { conversionId: purchaseConvId });
+    _fbqTrack('InitiateCheckout');
 
     // Redirect to Stripe Checkout
     console.log('[shop] redirecting to Stripe:', data.url);
@@ -1776,11 +1795,13 @@ _shopModal.addEventListener('click', async (e) => {
           if (unlimitedAdded) {
             showToast('✅ Unlimited access activated! Enjoy unlimited downloads.', 6000);
             _rdtTrack('Purchase', { value: 20, currency: 'USD', conversionId: convId });
+            _fbqTrack('Purchase', { value: 20, currency: 'USD' });
           } else {
             const added = balanceNow - balanceBefore;
             showToast(`✅ ${added} credits added! Balance: ${balanceNow}`, 6000);
             const packPrice = added >= 50 ? 5 : added >= 20 ? 3 : 1;
             _rdtTrack('Purchase', { value: packPrice, currency: 'USD', conversionId: convId });
+            _fbqTrack('Purchase', { value: packPrice, currency: 'USD' });
           }
           return;
         }
@@ -1793,6 +1814,7 @@ _shopModal.addEventListener('click', async (e) => {
         const convIdFallback = sessionStorage.getItem('rdt_purchase_conv_id') || ('purchase_' + Date.now());
         sessionStorage.removeItem('rdt_purchase_conv_id');
         _rdtTrack('Purchase', { currency: 'USD', conversionId: convIdFallback });
+        _fbqTrack('Purchase', { currency: 'USD' });
       }
     }, INTERVAL_MS);
 
