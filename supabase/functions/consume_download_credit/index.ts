@@ -5,7 +5,7 @@
 //          All credit logic lives in the SQL function consume_download_credit()
 //          which uses SELECT FOR UPDATE to prevent concurrent double-spend.
 //
-// Input:  { format: 'svg'|'png'|'pdf'|'dxf', design_hash?: string, guest_id?: string }
+// Input:  { format: 'svg'|'png'|'pdf'|'dxf'|'stl', design_hash?: string, guest_id?: string }
 // Output:
 //   { ok:true,  consumed:false, credits_balance }   — unlimited pass active
 //   { ok:true,  consumed:true,  credits_balance }   — credit consumed
@@ -19,7 +19,7 @@ const CORS_HEADERS = {
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const VALID_FORMATS = new Set(['svg', 'png', 'pdf', 'dxf']);
+const VALID_FORMATS = new Set(['svg', 'png', 'pdf', 'dxf', 'stl']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function json(body: unknown, status = 200): Response {
