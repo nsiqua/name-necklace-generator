@@ -1,4 +1,5 @@
 import * as makerjsNS from 'makerjs';
+import { exportSTLFromPath } from './exportSTL.js';
 
 // Normalize CommonJS/ESM interop
 const makerjs = makerjsNS.default ?? makerjsNS;
@@ -323,7 +324,7 @@ function _addFontOptionFromBuffer(fontName, buffer, { userFont = false, switchTo
 let currentSettings = {
   fontSize: 80,
   letterSpacing: 0,
-  targetHeight: 15,  // in mm
+  targetHeight: 10,  // in mm
   weldPaths: true,   // boolean union enabled by default
   pairSpacingMap: { ...BUILTIN_PAIR_OVERRIDES }, // pair-specific spacing overrides (start with built-in defaults)
   connectIDots: true, // connect i/j dots to stems
@@ -333,8 +334,8 @@ let currentSettings = {
 
   // LOOPS: enabled by default for stainless steel
   addLoops: true,
-  loopInnerDiameter: 3.0,  // mm (default for stainless)
-  loopOuterDiameter: 5.5,  // mm (default for stainless)
+  loopInnerDiameter: 2.5,  // mm (default for stainless)
+  loopOuterDiameter: 4.0,  // mm (default for stainless)
   loopOffset: 0.6,         // mm offset from text
   loopOverlap: 1.6,        // mm overlap for welding (increased default)
 
@@ -1966,6 +1967,10 @@ downloadBtn.addEventListener('click', async () => {
     downloadPDF();
   } else if (selectedFormat === 'dxf') {
     downloadDXF();
+  } else if (selectedFormat === 'stl') {
+    const pathData = document.getElementById('namePath').getAttribute('d');
+    const safeName = name.replace(/\s+/g, '_');
+    exportSTLFromPath(pathData, currentSettings.targetHeight, `${safeName}_necklace.stl`);
   } else {
     downloadSVG();
   }
@@ -2377,26 +2382,33 @@ function attachLoopsToEnds(textItem, options = {}, debugMode = false) {
     outerDiameterMm = 4.6,
     offsetFromTextMm = 0.6,
     loopOverlapMm = 0.4,  // How much the loop's OUTER ring overlaps the text
-    glyphBounds = null    // Array of glyph bounding boxes for anchor region filtering
+    glyphBounds = null,   // Array of glyph bounding boxes for anchor region filtering
+    // effectivePxPerMm: the actual px-per-mm ratio derived from the text bounding box.
+    // This MUST match the scale used to render the text so loop physical sizes are correct.
+    // Falls back to PX_PER_MM (96 DPI) only if not supplied (legacy / non-loop paths).
+    effectivePxPerMm = PX_PER_MM
   } = options;
 
   console.log('🔵 Attaching loops to text ends using geometry sampling...');
   if (debugMode) {
-    console.log('  Options:', { innerDiameterMm, outerDiameterMm, offsetFromTextMm, loopOverlapMm });
+    console.log('  Options:', { innerDiameterMm, outerDiameterMm, offsetFromTextMm, loopOverlapMm, effectivePxPerMm });
   }
 
-  // Calculate dimensions in Paper.js units (px)
-  const innerRadiusPx = (innerDiameterMm / 2) * PX_PER_MM;
-  const outerRadiusPx = (outerDiameterMm / 2) * PX_PER_MM;
+  // Calculate dimensions in Paper.js units (px).
+  // Use effectivePxPerMm (derived from text bounding box) so loop sizes match
+  // the same coordinate space in which the text was drawn.
+  const innerRadiusPx = (innerDiameterMm / 2) * effectivePxPerMm;
+  const outerRadiusPx = (outerDiameterMm / 2) * effectivePxPerMm;
   const outerRadiusMm = outerDiameterMm / 2;  // For margin calculation in findAnchorPoints
   const thicknessMm = (outerDiameterMm - innerDiameterMm) / 2;
-  const offsetPx = offsetFromTextMm * PX_PER_MM;
-  const overlapPx = loopOverlapMm * PX_PER_MM;
+  const offsetPx = offsetFromTextMm * effectivePxPerMm;
+  const overlapPx = loopOverlapMm * effectivePxPerMm;
   const sampleStepMm = 0.5; // Sample every 0.5mm
-  const sampleStepPx = sampleStepMm * PX_PER_MM;
+  const sampleStepPx = sampleStepMm * effectivePxPerMm;
 
   if (debugMode) {
     console.log('  Calculated dimensions:');
+    console.log(`    Effective px/mm: ${effectivePxPerMm.toFixed(4)} (96-DPI baseline: ${PX_PER_MM.toFixed(4)})`);
     console.log(`    Inner diameter: ${innerDiameterMm}mm (radius: ${innerRadiusPx.toFixed(2)}px)`);
     console.log(`    Outer diameter: ${outerDiameterMm}mm (radius: ${outerRadiusPx.toFixed(2)}px)`);
     console.log(`    Loop thickness: ${thicknessMm.toFixed(2)}mm`);
@@ -2406,7 +2418,7 @@ function attachLoopsToEnds(textItem, options = {}, debugMode = false) {
   }
 
   // STEP 1: Find anchor points on the text outline
-  const anchors = findAnchorPoints(textItem, sampleStepPx, debugMode, glyphBounds, outerRadiusMm);
+  const anchors = findAnchorPoints(textItem, sampleStepPx, debugMode, glyphBounds, outerRadiusMm, effectivePxPerMm);
 
   if (!anchors.left || !anchors.right) {
     console.error('❌ Could not find anchor points on text outline');
@@ -2429,7 +2441,8 @@ function attachLoopsToEnds(textItem, options = {}, debugMode = false) {
     overlapPx,
     textItem,
     side: 'left',
-    debugMode
+    debugMode,
+    effectivePxPerMm
   });
 
   // STEP 3: Weld left loop to text
@@ -2461,7 +2474,8 @@ function attachLoopsToEnds(textItem, options = {}, debugMode = false) {
     overlapPx,
     textItem,
     side: 'right',
-    debugMode
+    debugMode,
+    effectivePxPerMm
   });
 
   // STEP 5: Weld right loop to text
@@ -2505,7 +2519,7 @@ function attachLoopsToEnds(textItem, options = {}, debugMode = false) {
  * @param {Array} glyphBounds - Array of {x1,y1,x2,y2,char,index} for each glyph
  * @param {number} outerRadiusMm - Outer radius of loop for margin calculation
  */
-function findAnchorPoints(textItem, sampleStepPx, debugMode, glyphBounds = null, outerRadiusMm = 0) {
+function findAnchorPoints(textItem, sampleStepPx, debugMode, glyphBounds = null, outerRadiusMm = 0, effectivePxPerMm = PX_PER_MM) {
   if (debugMode) {
     console.log('  📍 Sampling points along text outline...');
   }
@@ -2520,7 +2534,7 @@ function findAnchorPoints(textItem, sampleStepPx, debugMode, glyphBounds = null,
 
   // Sample points along all paths
   const sampledPoints = [];
-  const flattenTolerance = 0.2 * PX_PER_MM; // 0.2mm tolerance
+  const flattenTolerance = 0.2 * effectivePxPerMm; // 0.2mm tolerance (in text coordinate space)
 
   for (const path of paths) {
     // Flatten path for stable sampling
@@ -2802,7 +2816,8 @@ function createAndPlaceLoop(config) {
     overlapPx,
     textItem,
     side,
-    debugMode
+    debugMode,
+    effectivePxPerMm = PX_PER_MM
   } = config;
 
   if (debugMode) {
@@ -2840,7 +2855,7 @@ function createAndPlaceLoop(config) {
   }
 
   // STEP: Verify overlap and adjust if needed
-  const overlapResult = ensureOverlap(loopRing, textItem, anchorPoint, outwardDir, overlapPx, debugMode);
+  const overlapResult = ensureOverlap(loopRing, textItem, anchorPoint, outwardDir, overlapPx, debugMode, effectivePxPerMm);
 
   if (!overlapResult.hasOverlap) {
     console.warn(`    ⚠️ ${side} loop: Could not achieve overlap, creating bridge tab...`);
@@ -2866,9 +2881,9 @@ function createAndPlaceLoop(config) {
 /**
  * Ensure the loop overlaps the text, adjusting position if needed
  */
-function ensureOverlap(loopRing, textItem, anchorPoint, outwardDir, targetOverlapPx, debugMode) {
+function ensureOverlap(loopRing, textItem, anchorPoint, outwardDir, targetOverlapPx, debugMode, effectivePxPerMm = PX_PER_MM) {
   const maxSteps = 50;
-  const stepPull = 0.2 * PX_PER_MM; // Pull 0.2mm at a time
+  const stepPull = 0.2 * effectivePxPerMm; // Pull 0.2mm at a time (in text coordinate space)
   const minOverlapArea = 1.0; // Minimum area in px² to consider as overlap
 
   // Test current overlap
@@ -4193,12 +4208,23 @@ function applyPaperJsUnion(text, fontSize, letterSpacing, pairSpacingMap = {}) {
       console.log('═══════════════════════════════════════════════════════');
       console.log('');
 
+      // Compute the effective px-per-mm ratio from the actual text bounding box.
+      // The exported SVG maps Paper.js px → physical mm via:
+      //   effectivePxPerMm = textHeightPx / targetHeightMm
+      // Loops MUST use this same ratio so their physical size matches the configured mm values.
+      // Using the hardcoded 96-DPI constant (PX_PER_MM) produces the wrong size because
+      // opentype.js font coordinates are not in 96-DPI screen pixels.
+      const textHeightPx = result.bounds.height;
+      const effectivePxPerMm = textHeightPx / currentSettings.targetHeight;
+      console.log(`  Effective px/mm: ${effectivePxPerMm.toFixed(4)} (text height: ${textHeightPx.toFixed(2)}px, target: ${currentSettings.targetHeight}mm)`);
+
       result = attachLoopsToEnds(result, {
         innerDiameterMm: currentSettings.loopInnerDiameter,
         outerDiameterMm: currentSettings.loopOuterDiameter,
         offsetFromTextMm: currentSettings.loopOffset,
         loopOverlapMm: currentSettings.loopOverlap || 0.4,
-        glyphBounds: glyphBounds  // Pass glyph bounds for anchor region filtering
+        glyphBounds: glyphBounds,  // Pass glyph bounds for anchor region filtering
+        effectivePxPerMm           // Pass correct coordinate-space scale
       }, currentSettings.debugMode);
 
       console.log('');
