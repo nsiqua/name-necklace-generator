@@ -1,6 +1,6 @@
-# Name Necklace SVG Generator
+# Name Necklace Generator
 
-A simple web app that converts text in Pacifico font to laser-cut friendly SVG files for stainless steel name necklaces.
+A simple web app that converts text in varous fonts to laser-cut friendly files(SVG and DXF) for stainless steel name necklaces.
 
 ## 🗄️ Supabase Setup (Required for Auth & Guest Tracking)
 
